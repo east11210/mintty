@@ -1089,6 +1089,7 @@ win_key_down(WPARAM wp, LPARAM lp)
           when VK_F3:  send_syscommand(IDM_SEARCH);
           when VK_F4:  send_syscommand(SC_CLOSE);
           when VK_F8:  send_syscommand(IDM_RESET);
+          when VK_F9:  win_open_commands();
           when VK_F10: send_syscommand(IDM_DEFSIZE_ZOOM);
           when VK_F11: send_syscommand(IDM_FULLSCREEN_ZOOM);
           when VK_F12: send_syscommand(IDM_FLIPSCREEN);
@@ -1106,6 +1107,7 @@ win_key_down(WPARAM wp, LPARAM lp)
         when 'C': term_copy();
         when 'V': win_paste();
         when 'I': open_popup_menu(true, "ls", mods);
+        when 'M': win_open_commands();
         when 'N': send_syscommand(IDM_NEW);
         when 'W': send_syscommand(SC_CLOSE);
         when 'R': send_syscommand(IDM_RESET);

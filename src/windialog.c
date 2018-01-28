@@ -905,3 +905,4 @@ win_show_warning(char * msg)
   message_box(0, msg, null, MB_ICONWARNING, 0);
 }
 
+#include "wincmds.inl"

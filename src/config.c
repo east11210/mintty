@@ -30,6 +30,11 @@ string config_dir = 0;
 static wstring rc_filename = 0;
 static char linebuf[444];
 
+#define CMD_PREFIX "PopupCommand"
+ushort cmd_max_num = 0;
+ushort cmd_num = 0;
+wstring *cmd_content = 0;
+wstring *cmd_title = 0;
 
 // all entries need initialisation in options[] or crash...
 const config default_cfg = {
@@ -567,6 +572,21 @@ clear_opts(void)
       free(file_opts[n].comment);
   file_opts_num = 0;
   arg_opts_num = 0;
+
+  if (cmd_max_num) {
+    for (uint n = 0; n < cmd_num; ++n) {
+      if (cmd_title[n]) {
+        free((void*) cmd_title[n]);
+      }
+      if (cmd_content[n]) {
+        free((void *)cmd_content[n]);
+      }
+    }
+    free(cmd_content);
+    free(cmd_title);
+    cmd_num = cmd_max_num = 0;
+    cmd_content = cmd_title = null;
+  }
 }
 
 static bool
@@ -745,7 +765,34 @@ set_option(string name, string val_str, bool from_file)
 }
 
 static int
-parse_option(string option, bool from_file)
+set_commands(string name, string val_str, bool from_file)
+{
+  if (0 != strncmp(name, CMD_PREFIX, sizeof(CMD_PREFIX) - 1)) {
+    return -1;
+  }
+  if (cmd_num >= cmd_max_num) {
+    cmd_max_num += 10;
+    cmd_content = realloc(cmd_content, cmd_max_num * sizeof(**cmd_content));
+    cmd_title = realloc(cmd_title, cmd_max_num * sizeof(**cmd_title));
+  }
+  wchar* val_wstr = from_file ? cs__utforansitowcs(val_str) : cs__mbstowcs(val_str);
+  wchar *colon = wcschr(val_wstr, ':');
+  if (!colon) {
+    opterror(_("Ignoring option '%s' with error value %s"),
+             from_file, name, val_str);
+    free(val_wstr);
+    return -1;
+  }
+  *colon++ = 0;
+  colon[wcscspn(colon, L"\r")] = 0;
+  cmd_title[cmd_num] = val_wstr;
+  cmd_content[cmd_num] = colon;
+  fprintf(stderr, "%S, %S\n", cmd_title[cmd_num], cmd_content[cmd_num]);
+  ++cmd_num;
+  return cmd_num;
+}
+
+static int parse_option(string option, bool from_file)
 {
   const char *eq = strchr(option, '=');
   if (!eq) {
@@ -768,6 +815,9 @@ parse_option(string option, bool from_file)
   while (isspace((uchar)*val))
     val++;
 
+  if (0 < set_commands(name, val, from_file)) {
+    return -1;
+  }
   return set_option(name, val, from_file);
 }
 
@@ -1313,7 +1363,7 @@ finish_config(void)
     (void)load_messages_lang("messages");
 #endif
 #ifdef debug_opterror
-  opterror("Täst L %s %s", false, "b�h", "b�h�");
+  opterror("Täst L %s %s", false, "b�h", "b�h�");
   opterror("Täst U %s %s", true, "böh", "büh€");
 #endif
 

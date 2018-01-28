@@ -3,6 +3,7 @@
 
 #define IDD_MAINBOX      100
 #define IDI_MAINICON     200
+#define IDD_CMDSBOX      300
 
 /* From MSDN: In the WM_SYSCOMMAND message, the four low-order bits of
  * wParam are used by Windows, and should be masked off, so we shouldn't

@@ -49,6 +49,7 @@ extern void win_font_cs_reconfig(bool font_changed);
 extern void win_adapt_term_size(bool sync_size_with_font, bool scale_font_with_size);
 
 extern void win_open_config(void);
+extern void win_open_commands(void);
 extern void * load_library_func(string lib, string func);
 extern void update_available_version(bool ok);
 extern void set_dpi_auto_scaling(bool on);

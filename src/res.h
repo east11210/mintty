@@ -16,6 +16,10 @@
 #define DIALOG_TITLE "Options"
 #define DIALOG_CLASS "ConfigBox"
 
+#define CMD_DIALOG_HEIGHT 200
+#define CMD_DIALOG_WIDTH 432
+#define CMD_DIALOG_CLASS "CommandBox"
+
 #define DIALOG_FONT "MS Shell Dlg"
 //#define DIALOG_FONT "Tahoma"
 
