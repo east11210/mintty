@@ -772,8 +772,8 @@ set_commands(string name, string val_str, bool from_file)
   }
   if (cmd_num >= cmd_max_num) {
     cmd_max_num += 10;
-    cmd_content = realloc(cmd_content, cmd_max_num * sizeof(**cmd_content));
-    cmd_title = realloc(cmd_title, cmd_max_num * sizeof(**cmd_title));
+    cmd_content = realloc(cmd_content, cmd_max_num * sizeof(cmd_content[0]));
+    cmd_title = realloc(cmd_title, cmd_max_num * sizeof(cmd_title[0]));
   }
   wchar* val_wstr = from_file ? cs__utforansitowcs(val_str) : cs__mbstowcs(val_str);
   wchar *colon = wcschr(val_wstr, ':');
@@ -787,7 +787,6 @@ set_commands(string name, string val_str, bool from_file)
   colon[wcscspn(colon, L"\r")] = 0;
   cmd_title[cmd_num] = val_wstr;
   cmd_content[cmd_num] = colon;
-  fprintf(stderr, "%S, %S\n", cmd_title[cmd_num], cmd_content[cmd_num]);
   ++cmd_num;
   return cmd_num;
 }
