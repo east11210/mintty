@@ -20,6 +20,7 @@
 #define IDM_RESET           0x0060
 #define IDM_DEFSIZE         0x0070
 #define IDM_DEFSIZE_ZOOM    0x0170
+#define IDM_SCROLLBAR       0x0280
 #define IDM_FULLSCREEN      0x0080
 #define IDM_FULLSCREEN_ZOOM 0x0180
 #define IDM_BREAK           0x0090
@@ -31,6 +32,9 @@
 #define IDM_SEARCH          0x00F0
 #define IDM_TOGLOG          0x01F0
 #define IDM_TOGCHARINFO     0x02F0
+#define IDM_TOGVT220KB      0x0300
+#define IDM_HTML            0x0310
+
 #define IDM_USERCOMMAND     0x1000
 #define IDM_SESSIONCOMMAND  0x5000
 #define IDM_GOTAB           0x9000

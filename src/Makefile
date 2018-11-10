@@ -170,7 +170,7 @@ $(bin): $(bins)
 WGET=curl -R -O --connect-timeout 55
 WGET+=-z $@
 
-rgb:	# /usr/share/X11/rgb.txt # X11 color names
+rgb.t:	# /usr/share/X11/rgb.txt # X11 color names
 #	255 250 250		snow
 #	->
 #		{255, 250, 250, "snow"},
@@ -186,7 +186,8 @@ clean-unicode:
 combining.t:	# UnicodeData.txt Blocks.txt
 	uniset +cat=Me +cat=Mn +cat=Cf -00AD +1160-11FF +200B +D7B0-D7C6 +D7CB-D7FB c > combining.t
 
-ambiguous.t:	WIDTH-A # UnicodeData.txt Blocks.txt
+ambiguous.t:	# WIDTH-A # UnicodeData.txt Blocks.txt
+	sh ./mkwidthA
 	uniset +WIDTH-A -cat=Me -cat=Mn -cat=Cf c > ambiguous.t
 
 combdouble=$(shell sed -e "s,^\([^;]*\);.*Mn;23[34];.*, +\1," -e t -e d UnicodeData.txt )
@@ -212,13 +213,14 @@ bidiclasses.t:	# UnicodeData.txt
 unicode:	UnicodeData.txt Blocks.txt EastAsianWidth.txt
 
 full-emoji-list.html:
-	$(WGET) http://www.unicode.org/emoji/charts-11.0/$@
+	#$(WGET) http://www.unicode.org/emoji/charts-11.0/$@
+	$(WGET) http://www.unicode.org/emoji/charts/$@
 
 emoji-%.txt:
-	$(WGET) http://unicode.org/Public/emoji/11.0/$@
+	$(WGET) http://www.unicode.org/Public/emoji/11.0/$@
 
 %.txt:
-	$(WGET) http://unicode.org/Public/UNIDATA/$@
+	$(WGET) http://www.unicode.org/Public/UNIDATA/$@
 
 emojibase.t:	# emoji-data.txt emoji-variation-sequences.txt emoji-sequences.txt emoji-zwj-sequences.txt
 	bash ./mkemojis base > $@
@@ -316,6 +318,9 @@ _wm.t:	# Windows Message names, only for debugging
 #		{0x0000, "WM_NULL"},
 	sed -e 's/^#define \(WM_[^ ]*\) *\(0x[0-9A-Fa-f]*\)$$/  {\2, "\1"},/' -e t -e d /usr/include/w32api/winuser.h | tr 'abcdef' 'ABCDEF' > _wm.t
 	echo '  {0x02E0, "WM_DPICHANGED"},' >> _wm.t
+	echo '  {0x02E2, "WM_DPICHANGED_BEFOREPARENT"},' >> _wm.t
+	echo '  {0x02E3, "WM_DPICHANGED_AFTERPARENT"},' >> _wm.t
+	echo '  {0x02E4, "WM_GETDPISCALEDSIZE"},' >> _wm.t
 	# or, with include file copied from Windows SDK:
 	#sed -e 's/^#define \(WM_[^ ]*\) *\(0x[0-9A-Fa-f]*\)$$/  {\2, "\1"},/' -e t -e d etc/WinUser.h | tr 'abcdef' 'ABCDEF' > _wm.t
 

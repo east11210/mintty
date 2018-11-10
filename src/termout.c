@@ -4,7 +4,7 @@
 // Licensed under the terms of the GNU General Public License v3 or later.
 
 #include "termpriv.h"
-#include "winpriv.h"  // win_get_font, win_change_font
+#include "winpriv.h"  // win_get_font, win_change_font, win_led
 
 #include "win.h"
 #include "appinfo.h"
@@ -19,6 +19,8 @@
 
 #define TERM_CMD_BUF_INC_STEP 128
 #define TERM_CMD_BUF_MAX_SIZE (1024 * 1024)
+
+#define SUB_PARS (1 << (sizeof(*term.csi_argv) * 8 - 1))
 
 /* This combines two characters into one value, for the purpose of pairing
  * any modifier byte and the final byte in escape sequences.
@@ -175,7 +177,7 @@ write_backspace(void)
   int term_top = curs->origin ? term.marg_top : 0;
   if (curs->x == 0 && (curs->y == term_top || !curs->autowrap
                        || (!cfg.old_wrapmodes && !curs->rev_wrap)))
-   /* do nothing */ ;
+    /* skip */;
   else if (curs->x == 0 && curs->y > term_top)
     curs->x = term.cols - 1, curs->y--;
   else if (curs->wrapnext) {
@@ -246,7 +248,8 @@ write_primary_da(void)
 static wchar last_high = 0;
 static wchar last_char = 0;
 static int last_width = 0;
-cattr last_attr = {.attr = ATTR_DEFAULT, .truefg = 0, .truebg = 0};
+cattr last_attr = {.attr = ATTR_DEFAULT,
+                   .truefg = 0, .truebg = 0, .ulcolr = (colour)-1};
 
 static void
 write_char(wchar c, int width)
@@ -276,10 +279,13 @@ write_char(wchar c, int width)
     clear_cc(line, curs->x);
     line->chars[curs->x].chr = c;
     line->chars[curs->x].attr = curs->attr;
+    if (cfg.ligatures_support)
+      term_invalidate(0, curs->y, curs->x, curs->y);
   }
 
   if (curs->wrapnext && curs->autowrap && width > 0) {
     line->lattr |= LATTR_WRAPPED;
+    line->wrappos = curs->x;
     if (curs->y == term.marg_bot)
       term_do_scroll(term.marg_top, term.marg_bot, 1, true);
     else if (curs->y < term.rows - 1)
@@ -316,6 +322,7 @@ write_char(wchar c, int width)
       if (curs->x == term.cols - 1) {
         line->chars[curs->x] = term.erase_char;
         line->lattr |= LATTR_WRAPPED | LATTR_WRAPPED2;
+        line->wrappos = curs->x;
         if (curs->y == term.marg_bot)
           term_do_scroll(term.marg_top, term.marg_bot, 1, true);
         else if (curs->y < term.rows - 1)
@@ -375,9 +382,32 @@ write_char(wchar c, int width)
 static void
 write_error(void)
 {
-  // Write 'Medium Shade' character from vt100 linedraw set,
-  // which looks appropriately erroneous.
-  write_char(0x2592, 1);
+  // Write one of REPLACEMENT CHARACTER or, if that does not exist,
+  // MEDIUM SHADE which looks appropriately erroneous.
+  wchar errch = 0xFFFD;
+  win_check_glyphs(&errch, 1);
+  if (!errch)
+    errch = 0x2592;
+  write_char(errch, 1);
+}
+
+
+static bool
+contains(string s, int i)
+{
+  while (*s) {
+    while (*s == ',')
+      s++;
+    int si = -1;
+    int len;
+    sscanf(s, "%d%n", &si, &len);
+    if (len <= 0)
+      return false;
+    s += len;
+    if (si == i && (!*s || *s == ','))
+      return true;
+  }
+  return false;
 }
 
 /* Process control character, returning whether it has been recognised. */
@@ -432,69 +462,82 @@ do_esc(uchar c)
   term_cursor *curs = &term.curs;
   term.state = NORMAL;
 
-  // NRC tweaks
-  uchar nrc_designate = 0;
-  uchar nrc_select = 0;
-  // first check for two-character character set designations (%5, %6)
-  if (term.esc_mod == 0xFF && esc_mod1 == '%'
-      && strchr("()-*.+/", esc_mod0)) {
-    // transform two-character character set designations
-    nrc_designate = esc_mod0;
-    nrc_select = c == '5' ? CSET_DECSPGR : c;
-  }
-  // then check for further designations that work without decnrc_enabled
-  else if (strchr("<", c) && strchr("()-*.+/", term.esc_mod)) {
-    // '<': DEC Supplementary
-    nrc_designate = term.esc_mod;
-    nrc_select = c;
-  }
-  // ↕ this is a bit ugly (xterm uses a table), but hey it works
-  if (term.curs.decnrc_enabled
-     // also allow unguarded designations
-     || (nrc_designate && strchr("%<", nrc_select))
-     ) {
-    if (!nrc_designate && strchr("()-*.+/", term.esc_mod)) {
-      nrc_designate = term.esc_mod;
-      // transform alternative designation indicators
-      switch (c) {
-        when 'C':  nrc_select = CSET_FI;
-        when 'E':  nrc_select = CSET_NO;
-        when '6':  nrc_select = CSET_NO;
-        when 'H':  nrc_select = CSET_SE;
-        when 'f':  nrc_select = CSET_FR;  // not documented for DEC VT510
-        when '9':  nrc_select = CSET_CA;  // not documented for DEC VT320
-        otherwise: nrc_select = c;
+  // NRC designations
+  // representation of NRC sequences at this point:
+  //		term.esc_mod esc_mod0 esc_mod1 c
+  // ESC)B	29 00 00 42
+  // ESC)%5	FF 29 25 35
+  // 94-character set designation as G0...G3: ()*+
+  // 96-character set designation as G1...G3:  -./
+  uchar designator = term.esc_mod == 0xFF ? esc_mod0 : term.esc_mod;
+  uchar csmask = 0;
+  int gi;
+  if (designator) {
+    void check_designa(char * designa, uchar cstype) {
+      char * csdesigna = strchr(designa, designator);
+      if (csdesigna) {
+        csmask = cstype;
+        gi = csdesigna - designa + cstype - 1;
       }
     }
-    // if a character set designation was identified, check if it's applicable
-    if (nrc_designate) {
-      if (strchr("<%45RQKY`6Z7=", nrc_select)) {
-        // 94 character sets
-        switch (nrc_designate) {
-          when '(': curs->csets[0] = nrc_select;
-          when ')': curs->csets[1] = nrc_select;
-          when '*': curs->csets[2] = nrc_select;
-          when '+': curs->csets[3] = nrc_select;
-          otherwise: nrc_select = 0;
-        }
-      }
-      else if (strchr("A", nrc_select)) {
-        // 96 character sets
-        switch (nrc_designate) {
-          when '-': curs->csets[1] = nrc_select;
-          when '.': curs->csets[2] = nrc_select;
-          when '/': curs->csets[3] = nrc_select;
-          otherwise: nrc_select = 0;
-        }
-      }
-      else
-        nrc_select = 0;
-      // finish handling if a character set designation was applied
-      if (nrc_select) {
+    check_designa("()*+", 1);  // 94-character set designation?
+    check_designa("-./", 2);  // 96-character set designation?
+  }
+  if (csmask) {
+    static struct {
+      ushort design;
+      uchar cstype;  // 1: 94-character set, 2: 96-character set, 3: both
+      bool free;     // does not need NRC enabling
+      uchar cs;
+    } csdesignations[] = {
+      {'B', 1, 1, CSET_ASCII},	// ASCII
+      {'A', 3, 1, CSET_GBCHR},	// UK Latin-1
+      {'0', 1, 1, CSET_LINEDRW},	// DEC Special Line Drawing
+      {'>', 1, 1, CSET_TECH},		// DEC Technical
+      {'U', 1, 1, CSET_OEM},		// OEM Codepage 437
+      {'<', 1, 1, CSET_DECSUPP},	// DEC Supplementary (VT200)
+      {CPAIR('%', '5'), 1, 1, CSET_DECSPGR},	// DEC Supplementary Graphics (VT300)
+      // definitions for NRC support:
+      {'4', 1, 0, CSET_NL},	// Dutch
+      {'C', 1, 0, CSET_FI},	// Finnish
+      {'5', 1, 0, CSET_FI},	// Finnish
+      {'R', 1, 0, CSET_FR},	// French
+      {'f', 1, 0, CSET_FR},	// French
+      {'Q', 1, 0, CSET_CA},	// French Canadian (VT200, VT300)
+      {'9', 1, 0, CSET_CA},	// French Canadian (VT200, VT300)
+      {'K', 1, 0, CSET_DE},	// German
+      {'Y', 1, 0, CSET_IT},	// Italian
+      {'`', 1, 0, CSET_NO},	// Norwegian/Danish
+      {'E', 1, 0, CSET_NO},	// Norwegian/Danish
+      {'6', 1, 0, CSET_NO},	// Norwegian/Danish
+      {CPAIR('%', '6'), 1, 0, CSET_PT},	// Portuguese (VT300)
+      {'Z', 1, 0, CSET_ES},	// Spanish
+      {'H', 1, 0, CSET_SE},	// Swedish
+      {'7', 1, 0, CSET_SE},	// Swedish
+      {'=', 1, 0, CSET_CH},	// Swiss
+      // 96-character sets (xterm 336)
+      {'L', 2, 1, CSET_ISO_Latin_Cyrillic},
+      {'F', 2, 1, CSET_ISO_Greek_Supp},
+      {'H', 2, 1, CSET_ISO_Hebrew},
+      {'M', 2, 1, CSET_ISO_Latin_5},
+      {CPAIR('"', '?'), 1, 1, CSET_DEC_Greek_Supp},
+      {CPAIR('"', '4'), 1, 1, CSET_DEC_Hebrew_Supp},
+      {CPAIR('%', '0'), 1, 1, CSET_DEC_Turkish_Supp},
+      {CPAIR('"', '>'), 1, 0, CSET_NRCS_Greek},
+      {CPAIR('%', '='), 1, 0, CSET_NRCS_Hebrew},
+      {CPAIR('%', '2'), 1, 0, CSET_NRCS_Turkish},
+    };
+    ushort nrc_code = CPAIR(esc_mod1, c);
+    for (uint i = 0; i < lengthof(csdesignations); i++)
+      if (csdesignations[i].design == nrc_code
+          && (csdesignations[i].cstype & csmask)
+          && (csdesignations[i].free || term.curs.decnrc_enabled)
+         )
+      {
+        curs->csets[gi] = csdesignations[i].cs;
         term_update_cs();
         return;
       }
-    }
   }
 
   switch (CPAIR(term.esc_mod, c)) {
@@ -558,31 +601,6 @@ do_esc(uchar c)
       term.lines[curs->y]->lattr = LATTR_NORM;
     when CPAIR('#', '6'):  /* DECDWL: 2*width */
       term.lines[curs->y]->lattr = LATTR_WIDE;
-    when CPAIR('(', 'A') or CPAIR('(', 'B') or CPAIR('(', '0') or CPAIR('(', '>'):
-     /* GZD4: G0 designate 94-set */
-      curs->csets[0] = c;
-      term_update_cs();
-    when CPAIR('(', 'U'):  /* G0: OEM character set */
-      curs->csets[0] = CSET_OEM;
-      term_update_cs();
-    when CPAIR(')', 'A') or CPAIR(')', 'B') or CPAIR(')', '0') or CPAIR(')', '>')
-      or CPAIR('-', 'A') or CPAIR('-', 'B') or CPAIR('-', '0') or CPAIR('-', '>'):
-     /* G1D4: G1-designate 94-set */
-      curs->csets[1] = c;
-      term_update_cs();
-    when CPAIR(')', 'U'): /* G1: OEM character set */
-      curs->csets[1] = CSET_OEM;
-      term_update_cs();
-    when CPAIR('*', 'A') or CPAIR('*', 'B') or CPAIR('*', '0') or CPAIR('*', '>')
-      or CPAIR('.', 'A') or CPAIR('.', 'B') or CPAIR('.', '0') or CPAIR('.', '>'):
-     /* Designate G2 character set */
-      curs->csets[2] = c;
-      term_update_cs();
-    when CPAIR('+', 'A') or CPAIR('+', 'B') or CPAIR('+', '0') or CPAIR('+', '>')
-      or CPAIR('/', 'A') or CPAIR('/', 'B') or CPAIR('/', '0') or CPAIR('/', '>'):
-     /* Designate G3 character set */
-      curs->csets[3] = c;
-      term_update_cs();
     when CPAIR('%', '8') or CPAIR('%', 'G'):
       curs->utf = true;
       term_update_cs();
@@ -619,6 +637,34 @@ do_sgr(void)
   cattr attr = term.curs.attr;
   uint prot = attr.attr & ATTR_PROTECTED;
   for (uint i = 0; i < argc; i++) {
+    // support colon-separated sub parameters as specified in
+    // ISO/IEC 8613-6 (ITU Recommendation T.416)
+    int sub_pars = 0;
+    // count sub parameters and clear their SUB_PARS flag 
+    // (the last one does not have it)
+    // but not the SUB_PARS flag of the main parameter
+    if (term.csi_argv[i] & SUB_PARS)
+      for (uint j = i + 1; j < argc; j++) {
+        sub_pars++;
+        if (term.csi_argv[j] & SUB_PARS)
+          term.csi_argv[j] &= ~SUB_PARS;
+        else
+          break;
+      }
+    if (*cfg.suppress_sgr
+        && contains(cfg.suppress_sgr, term.csi_argv[i] & ~SUB_PARS))
+    {
+      // skip suppressed attribute (but keep processing sub_pars)
+      // but turn some sequences into virtual sub-parameters
+      // in order to get properly adjusted
+      if (term.csi_argv[i] == 38 || term.csi_argv[i] == 48) {
+        if (i + 2 < argc && term.csi_argv[i + 1] == 5)
+          sub_pars = 2;
+        else if (i + 4 < argc && term.csi_argv[i + 1] == 2)
+          sub_pars = 4;
+      }
+    }
+    else
     switch (term.csi_argv[i]) {
       when 0:
         attr = CATTR_DEFAULT;
@@ -626,20 +672,41 @@ do_sgr(void)
       when 1: attr.attr |= ATTR_BOLD;
       when 2: attr.attr |= ATTR_DIM;
       when 3: attr.attr |= ATTR_ITALIC;
-      when 4: attr.attr |= ATTR_UNDER;
+      when 4:
+        attr.attr &= ~UNDER_MASK;
+        attr.attr |= ATTR_UNDER;
+      when 4 | SUB_PARS:
+        if (i + 1 < argc)
+          switch (term.csi_argv[i + 1]) {
+            when 0:
+              attr.attr &= ~UNDER_MASK;
+            when 1:
+              attr.attr &= ~UNDER_MASK;
+              attr.attr |= ATTR_UNDER;
+            when 2:
+              attr.attr &= ~UNDER_MASK;
+              attr.attr |= ATTR_DOUBLYUND;
+            when 3:
+              attr.attr &= ~UNDER_MASK;
+              attr.attr |= ATTR_CURLYUND;
+            when 4:
+              attr.attr &= ~UNDER_MASK;
+              attr.attr |= ATTR_BROKENUND;
+            when 5:
+              attr.attr &= ~UNDER_MASK;
+              attr.attr |= ATTR_BROKENUND | ATTR_DOUBLYUND;
+          }
       when 5: attr.attr |= ATTR_BLINK;
       when 6: attr.attr |= ATTR_BLINK2;
       when 7: attr.attr |= ATTR_REVERSE;
       when 8: attr.attr |= ATTR_INVISIBLE;
       when 9: attr.attr |= ATTR_STRIKEOUT;
       when 10 ... 11: {  // ... 12 disabled
-        // mode 10 is the configured Character set
+        // mode 10 is the configured character set
         // mode 11 is the VGA character set (CP437 + control range graphics)
-        // mode 12 is a weird feature from the Linux console,
-        // cloning the VGA character set (CP437) into the ASCII range;
-        // disabled (not supported by cygwin console);
-        // modes 11 (and 12) are overridden by alternate font setting
-        // if configured
+        // mode 12 (VT520, Linux console, not cygwin console) 
+        // clones VGA characters into the ASCII range; disabled;
+        // modes 11 (and 12) are overridden by alternative font if configured
           uchar arg_10 = term.csi_argv[i] - 10;
           if (arg_10 && *cfg.fontfams[arg_10].name) {
             attr.attr &= ~FONTFAM_MASK;
@@ -656,13 +723,15 @@ do_sgr(void)
         attr.attr &= ~FONTFAM_MASK;
         attr.attr |= (cattrflags)(term.csi_argv[i] - 10) << ATTR_FONTFAM_SHIFT;
       //when 21: attr.attr &= ~ATTR_BOLD;
-      when 21: attr.attr |= ATTR_DOUBLYUND;
+      when 21:
+        attr.attr &= ~UNDER_MASK;
+        attr.attr |= ATTR_DOUBLYUND;
       when 22: attr.attr &= ~(ATTR_BOLD | ATTR_DIM);
       when 23:
         attr.attr &= ~ATTR_ITALIC;
         if (((attr.attr & FONTFAM_MASK) >> ATTR_FONTFAM_SHIFT) + 10 == 20)
           attr.attr &= ~FONTFAM_MASK;
-      when 24: attr.attr &= ~(ATTR_UNDER | ATTR_DOUBLYUND);
+      when 24: attr.attr &= ~UNDER_MASK;
       when 25: attr.attr &= ~(ATTR_BLINK | ATTR_BLINK2);
       when 27: attr.attr &= ~ATTR_REVERSE;
       when 28: attr.attr &= ~ATTR_INVISIBLE;
@@ -670,12 +739,16 @@ do_sgr(void)
       when 30 ... 37: /* foreground */
         attr.attr &= ~ATTR_FGMASK;
         attr.attr |= (term.csi_argv[i] - 30 + ANSI0) << ATTR_FGSHIFT;
+      when 51 or 52: /* "framed" or "encircled" */
+        attr.attr |= ATTR_FRAMED;
+      when 54: /* not framed, not encircled */
+        attr.attr &= ~ATTR_FRAMED;
       when 53: attr.attr |= ATTR_OVERL;
       when 55: attr.attr &= ~ATTR_OVERL;
       when 90 ... 97: /* bright foreground */
         attr.attr &= ~ATTR_FGMASK;
         attr.attr |= ((term.csi_argv[i] - 90 + 8 + ANSI0) << ATTR_FGSHIFT);
-      when 38: /* 256-colour foreground */
+      when 38: /* palette/true-colour foreground */
         if (i + 2 < argc && term.csi_argv[i + 1] == 5) {
           // set foreground to palette colour
           attr.attr &= ~ATTR_FGMASK;
@@ -692,6 +765,39 @@ do_sgr(void)
           attr.truefg = make_colour(r, g, b);
           i += 4;
         }
+      when 38 | SUB_PARS: /* ISO/IEC 8613-6 foreground colour */
+        if (sub_pars >= 2 && term.csi_argv[i + 1] == 5) {
+          // set foreground to palette colour
+          attr.attr &= ~ATTR_FGMASK;
+          attr.attr |= ((term.csi_argv[i + 2] & 0xFF) << ATTR_FGSHIFT);
+        }
+        else if (sub_pars >= 4 && term.csi_argv[i + 1] == 2) {
+          // set foreground to RGB
+          uint pi = sub_pars >= 5;
+          attr.attr &= ~ATTR_FGMASK;
+          attr.attr |= TRUE_COLOUR << ATTR_FGSHIFT;
+          uint r = term.csi_argv[i + pi + 2];
+          uint g = term.csi_argv[i + pi + 3];
+          uint b = term.csi_argv[i + pi + 4];
+          attr.truefg = make_colour(r, g, b);
+        }
+        else if ((sub_pars >= 5 && term.csi_argv[i + 1] == 3) ||
+                 (sub_pars >= 6 && term.csi_argv[i + 1] == 4)) {
+          // set foreground to CMY(K)
+          ulong f = term.csi_argv[i + 2];
+          ulong c = term.csi_argv[i + 3];
+          ulong m = term.csi_argv[i + 4];
+          ulong y = term.csi_argv[i + 5];
+          ulong k = term.csi_argv[i + 1] == 4 ? term.csi_argv[i + 6] : 0;
+          if (c <= f && m <= f && y <= f && k <= f) {
+            uint r = (f - c) * (f - k) / f * 255 / f;
+            uint g = (f - m) * (f - k) / f * 255 / f;
+            uint b = (f - y) * (f - k) / f * 255 / f;
+            attr.attr &= ~ATTR_FGMASK;
+            attr.attr |= TRUE_COLOUR << ATTR_FGSHIFT;
+            attr.truefg = make_colour(r, g, b);
+          }
+        }
       when 39: /* default foreground */
         attr.attr &= ~ATTR_FGMASK;
         attr.attr |= ATTR_DEFFG;
@@ -701,7 +807,7 @@ do_sgr(void)
       when 100 ... 107: /* bright background */
         attr.attr &= ~ATTR_BGMASK;
         attr.attr |= ((term.csi_argv[i] - 100 + 8 + ANSI0) << ATTR_BGSHIFT);
-      when 48: /* 256-colour background */
+      when 48: /* palette/true-colour background */
         if (i + 2 < argc && term.csi_argv[i + 1] == 5) {
           // set background to palette colour
           attr.attr &= ~ATTR_BGMASK;
@@ -718,10 +824,79 @@ do_sgr(void)
           attr.truebg = make_colour(r, g, b);
           i += 4;
         }
+      when 48 | SUB_PARS: /* ISO/IEC 8613-6 background colour */
+        if (sub_pars >= 2 && term.csi_argv[i + 1] == 5) {
+          // set background to palette colour
+          attr.attr &= ~ATTR_BGMASK;
+          attr.attr |= ((term.csi_argv[i + 2] & 0xFF) << ATTR_BGSHIFT);
+        }
+        else if (sub_pars >= 4 && term.csi_argv[i + 1] == 2) {
+          // set background to RGB
+          uint pi = sub_pars >= 5;
+          attr.attr &= ~ATTR_BGMASK;
+          attr.attr |= TRUE_COLOUR << ATTR_BGSHIFT;
+          uint r = term.csi_argv[i + pi + 2];
+          uint g = term.csi_argv[i + pi + 3];
+          uint b = term.csi_argv[i + pi + 4];
+          attr.truebg = make_colour(r, g, b);
+        }
+        else if ((sub_pars >= 5 && term.csi_argv[i + 1] == 3) ||
+                 (sub_pars >= 6 && term.csi_argv[i + 1] == 4)) {
+          // set background to CMY(K)
+          ulong f = term.csi_argv[i + 2];
+          ulong c = term.csi_argv[i + 3];
+          ulong m = term.csi_argv[i + 4];
+          ulong y = term.csi_argv[i + 5];
+          ulong k = term.csi_argv[i + 1] == 4 ? term.csi_argv[i + 6] : 0;
+          if (c <= f && m <= f && y <= f && k <= f) {
+            uint r = (f - c) * (f - k) / f * 255 / f;
+            uint g = (f - m) * (f - k) / f * 255 / f;
+            uint b = (f - y) * (f - k) / f * 255 / f;
+            attr.attr &= ~ATTR_BGMASK;
+            attr.attr |= TRUE_COLOUR << ATTR_BGSHIFT;
+            attr.truebg = make_colour(r, g, b);
+          }
+        }
       when 49: /* default background */
         attr.attr &= ~ATTR_BGMASK;
         attr.attr |= ATTR_DEFBG;
+      when 58 | SUB_PARS: /* ISO/IEC 8613-6 format underline colour */
+        if (sub_pars >= 2 && term.csi_argv[i + 1] == 5) {
+          // set foreground to palette colour
+          attr.attr |= ATTR_ULCOLOUR;
+          attr.ulcolr = colours[term.csi_argv[i + 2] & 0xFF];
+        }
+        else if (sub_pars >= 4 && term.csi_argv[i + 1] == 2) {
+          // set foreground to RGB
+          uint pi = sub_pars >= 5;
+          uint r = term.csi_argv[i + pi + 2];
+          uint g = term.csi_argv[i + pi + 3];
+          uint b = term.csi_argv[i + pi + 4];
+          attr.attr |= ATTR_ULCOLOUR;
+          attr.ulcolr = make_colour(r, g, b);
+        }
+        else if ((sub_pars >= 5 && term.csi_argv[i + 1] == 3) ||
+                 (sub_pars >= 6 && term.csi_argv[i + 1] == 4)) {
+          // set foreground to CMY(K)
+          ulong f = term.csi_argv[i + 2];
+          ulong c = term.csi_argv[i + 3];
+          ulong m = term.csi_argv[i + 4];
+          ulong y = term.csi_argv[i + 5];
+          ulong k = term.csi_argv[i + 1] == 4 ? term.csi_argv[i + 6] : 0;
+          if (c <= f && m <= f && y <= f && k <= f) {
+            uint r = (f - c) * (f - k) / f * 255 / f;
+            uint g = (f - m) * (f - k) / f * 255 / f;
+            uint b = (f - y) * (f - k) / f * 255 / f;
+            attr.attr |= ATTR_ULCOLOUR;
+            attr.ulcolr = make_colour(r, g, b);
+          }
+        }
+      when 59: /* default underline colour */
+        attr.attr &= ~ATTR_ULCOLOUR;
+        attr.ulcolr = (colour)-1;
     }
+    // skip sub parameters
+    i += sub_pars;
   }
   term.curs.attr = attr;
   term.erase_char.attr = attr;
@@ -735,11 +910,16 @@ static void
 set_modes(bool state)
 {
   for (uint i = 0; i < term.csi_argc; i++) {
-    int arg = term.csi_argv[i];
+    uint arg = term.csi_argv[i];
     if (term.esc_mod) { /* DECSET/DECRST: DEC private mode set/reset */
+      if (*cfg.suppress_dec && contains(cfg.suppress_dec, arg))
+        ; // skip suppressed DECSET/DECRST operation
+      else
       switch (arg) {
         when 1:  /* DECCKM: application cursor keys */
           term.app_cursor_keys = state;
+        when 66:  /* DECNKM: application keypad */
+          term.app_keypad = state;
         when 2:  /* DECANM: VT100/VT52 mode */
           if (state) {
             // Designate USASCII for character sets G0-G3
@@ -762,7 +942,7 @@ set_modes(bool state)
         when 5:  /* DECSCNM: reverse video */
           if (state != term.rvideo) {
             term.rvideo = state;
-            win_invalidate_all();
+            win_invalidate_all(false);
           }
         when 6:  /* DECOM: DEC origin mode */
           term.curs.origin = state;
@@ -777,8 +957,18 @@ set_modes(bool state)
         when 9:  /* X10_MOUSE */
           term.mouse_mode = state ? MM_X10 : 0;
           win_update_mouse();
+        when 12: /* AT&T 610 blinking cursor */
+          term.cursor_blinks = state;
+          term.cursor_invalid = true;
+          term_schedule_cblink();
         when 25: /* DECTCEM: enable/disable cursor */
           term.cursor_on = state;
+          // Should we set term.cursor_invalid or call term_invalidate ?
+        when 30: /* Show/hide scrollbar */
+          if (state != term.show_scrollbar) {
+            term.show_scrollbar = state;
+            win_update_scrollbar(false);
+          }
         when 40: /* Allow/disallow DECCOLM (xterm c132 resource) */
           term.deccolm_allowed = state;
         when 42: /* DECNRCM: national replacement character sets */
@@ -822,6 +1012,10 @@ set_modes(bool state)
             term_switch_screen(state, true);
             term.disptop = 0;
           }
+        when 1046:       /* enable/disable alternate screen switching */
+          if (term.on_alt_screen && !state)
+            term_switch_screen(false, false);
+          cfg.disable_alternate_screen = !state;
         when 1048:       /* save/restore cursor */
           if (!cfg.disable_alternate_screen) {
             if (state)
@@ -861,10 +1055,9 @@ set_modes(bool state)
              off(default): sixel scrolling moves cursor to left of graphics */
           term.sixel_scrolls_left = state;
         when 7766:       /* 'B': Show/hide scrollbar (if enabled in config) */
-          if (state != term.show_scrollbar) {
+          if (cfg.scrollbar && state != term.show_scrollbar) {
             term.show_scrollbar = state;
-            if (cfg.scrollbar)
-              win_update_scrollbar();
+            win_update_scrollbar(true);
           }
         when 7767:       /* 'C': Changed font reporting */
           term.report_font_changed = state;
@@ -899,6 +1092,17 @@ set_modes(bool state)
           term.echoing = !state;
         when 20: /* LNM: Return sends ... */
           term.newline_mode = state;
+#ifdef support_Wyse_cursor_modes
+        when 33: /* WYSTCURM: steady Wyse cursor */
+          term.cursor_blinks = !state;
+          term.cursor_invalid = true;
+          term_schedule_cblink();
+        when 34: /* WYULCURM: Wyse underline cursor */
+          term.cursor_type = state;
+          term.cursor_blinks = false;
+          term.cursor_invalid = true;
+          term_schedule_cblink();
+#endif
       }
     }
   }
@@ -919,6 +1123,8 @@ get_mode(bool privatemode, int arg)
     switch (arg) {
       when 1:  /* DECCKM: application cursor keys */
         return 2 - term.app_cursor_keys;
+      when 66:  /* DECNKM: application keypad */
+        return 2 - term.app_keypad;
       when 2:  /* DECANM: VT100/VT52 mode */
         // Check USASCII for character sets G0-G3
         for (uint i = 0; i < lengthof(term.curs.csets); i++)
@@ -939,8 +1145,12 @@ get_mode(bool privatemode, int arg)
         return 3; // ignored
       when 9:  /* X10_MOUSE */
         return 2 - (term.mouse_mode == MM_X10);
+      when 12: /* AT&T 610 blinking cursor */
+        return 2 - term.cursor_blinks;
       when 25: /* DECTCEM: enable/disable cursor */
         return 2 - term.cursor_on;
+      when 30: /* Show/hide scrollbar */
+        return 2 - term.show_scrollbar;
       when 40: /* Allow/disallow DECCOLM (xterm c132 resource) */
         return 2 - term.deccolm_allowed;
       when 42: /* DECNRCM: national replacement character sets */
@@ -1025,6 +1235,15 @@ get_mode(bool privatemode, int arg)
         return 2 - term.echoing;
       when 20: /* LNM: Return sends ... */
         return 2 - term.newline_mode;
+#ifdef support_Wyse_cursor_modes
+      when 33: /* WYSTCURM: steady Wyse cursor */
+        return 2 - (!term.cursor_blinks);
+      when 34: /* WYULCURM: Wyse underline cursor */
+        if (term.cursor_type <= 1)
+          return 2 - (term.cursor_type == 1);
+        else
+          return 0;
+#endif
       otherwise:
         return 0;
     }
@@ -1066,6 +1285,39 @@ pop_mode(int mode)
   return -1;
 }
 
+struct cattr_entry {
+  cattr ca;
+  cattrflags mask;
+};
+static struct cattr_entry cattr_stack[10];
+static int cattr_stack_len = 0;
+
+static void
+push_attrs(cattr ca, cattrflags caflagsmask)
+{
+  if (cattr_stack_len == lengthof(cattr_stack)) {
+    for (int i = 1; i < cattr_stack_len; i++)
+      cattr_stack[i - 1] = cattr_stack[i];
+    cattr_stack_len--;
+  }
+  //printf("push_attrs[%d] %llX\n", cattr_stack_len, caflagsmask);
+  cattr_stack[cattr_stack_len].ca = ca;
+  cattr_stack[cattr_stack_len].mask = caflagsmask;
+  cattr_stack_len++;
+}
+
+static bool
+pop_attrs(cattr * _ca, cattrflags * _caflagsmask)
+{
+  if (!cattr_stack_len)
+    return false;
+  cattr_stack_len--;
+  //printf("pop_attrs[%d] %llX\n", cattr_stack_len, cattr_stack[cattr_stack_len].mask);
+  *_ca = cattr_stack[cattr_stack_len].ca;
+  *_caflagsmask = cattr_stack[cattr_stack_len].mask;
+  return true;
+}
+
 /*
  * dtterm window operations and xterm extensions.
    CSI Ps ; Ps ; Ps t
@@ -1074,14 +1326,23 @@ static void
 do_winop(void)
 {
   int arg1 = term.csi_argv[1], arg2 = term.csi_argv[2];
+  if (*cfg.suppress_win && contains(cfg.suppress_win, term.csi_argv[0]))
+    // skip suppressed window operation
+    return;
   switch (term.csi_argv[0]) {
     when 1: win_set_iconic(false);
     when 2: win_set_iconic(true);
     when 3: win_set_pos(arg1, arg2);
     when 4: win_set_pixels(arg1, arg2);
-    when 5: win_set_zorder(true);  // top
-    when 6: win_set_zorder(false); // bottom
-    when 7: win_invalidate_all();  // refresh
+    when 5:
+      if (term.csi_argc != 1)
+        return;
+      win_set_zorder(true);  // top
+    when 6:
+      if (term.csi_argc != 1)
+        return;
+      win_set_zorder(false); // bottom
+    when 7: win_invalidate_all(false);  // refresh
     when 8: {
       int def1 = term.csi_argv_defined[1], def2 = term.csi_argv_defined[2];
       int rows, cols;
@@ -1089,45 +1350,70 @@ do_winop(void)
       win_set_chars(arg1 ?: def1 ? rows : term.rows, arg2 ?: def2 ? cols : term.cols);
     }
     when 9: {
+      if (term.csi_argc != 2)
+        return;
       // Ps = 9 ; 0  -> Restore maximized window.
       // Ps = 9 ; 1  -> Maximize window (i.e., resize to screen size).
       // Ps = 9 ; 2  -> Maximize window vertically.
       // Ps = 9 ; 3  -> Maximize window horizontally.
+      int rows0 = term.rows, cols0 = term.cols;
       if (arg1 == 2) {
         // maximize window vertically
         win_set_geom(0, -1, 0, -1);
+        term.rows0 = rows0; term.cols0 = cols0;
       }
       else if (arg1 == 3) {
         // maximize window horizontally
         win_set_geom(-1, 0, -1, 0);
+        term.rows0 = rows0; term.cols0 = cols0;
       }
-      else
-        win_maximise(arg1);
+      else if (arg1 == 1) {
+        win_maximise(1);
+      }
+      else if (arg1 == 0) {
+        win_maximise(0);
+        win_set_chars(term.rows0, term.cols0);
+      }
     }
     when 10:
+      if (term.csi_argc != 2)
+        return;
       // Ps = 1 0 ; 0  -> Undo full-screen mode.
       // Ps = 1 0 ; 1  -> Change to full-screen.
       // Ps = 1 0 ; 2  -> Toggle full-screen.
       if (arg1 == 2)
         win_maximise(-2);
-      else
+      else if (arg1 == 1 || arg1 == 0)
         win_maximise(arg1 ? 2 : 0);
     when 11: child_write(win_is_iconic() ? "\e[1t" : "\e[2t", 4);
     when 13: {
       int x, y;
-      win_get_pos(&x, &y);
+      win_get_scrpos(&x, &y, arg1 == 2);
       child_printf("\e[3;%d;%dt", x, y);
     }
     when 14: {
       int height, width;
-      win_get_pixels(&height, &width);
+      win_get_pixels(&height, &width, arg1 == 2);
       child_printf("\e[4;%d;%dt", height, width);
     }
+    when 15: {
+      int w, h;
+      search_monitors(&w, &h, 0, false, 0);
+      child_printf("\e[5;%d;%dt", h, w);
+    }
+    when 16: child_printf("\e[6;%d;%dt", cell_height, cell_width);
     when 18: child_printf("\e[8;%d;%dt", term.rows, term.cols);
     when 19: {
+#ifdef size_of_monitor_only
+#warning not what xterm reports
       int rows, cols;
       win_get_screen_chars(&rows, &cols);
       child_printf("\e[9;%d;%dt", rows, cols);
+#else
+      int w, h;
+      search_monitors(&w, &h, 0, false, 0);
+      child_printf("\e[9;%d;%dt", h / cell_height, w / cell_width);
+#endif
     }
     when 22:
       if (arg1 == 0 || arg1 == 2)
@@ -1204,7 +1490,7 @@ do_csi(uchar c)
            curs->origin ? 2 : 0);
     when 'I':  /* CHT: move right N TABs */
       for (int i = 0; i < arg0_def1; i++)
-       write_tab();
+        write_tab();
     when 'J' or CPAIR('?', 'J'): { /* ED/DECSED: (selective) erase in display */
       if (arg0 == 3 && !term.esc_mod) { /* Erase Saved Lines (xterm) */
         term_clear_scrollback();
@@ -1249,6 +1535,64 @@ do_csi(uchar c)
         set_modes(val & 1);
       }
     }
+    when CPAIR('#', '{'): { /* Push video attributes onto stack (XTPUSHSGR) */
+      cattr ca = term.curs.attr;
+      cattrflags caflagsmask = 0;
+
+      void set_push(int attr) {
+        switch (attr) {
+          when 1: caflagsmask |= ATTR_BOLD;
+          when 2: caflagsmask |= ATTR_DIM;
+          when 3: caflagsmask |= ATTR_ITALIC;
+          when 4 or 21: caflagsmask |= UNDER_MASK;
+          when 5 or 6: caflagsmask |= ATTR_BLINK | ATTR_BLINK2;
+          when 7: caflagsmask |= ATTR_REVERSE;
+          when 8: caflagsmask |= ATTR_INVISIBLE;
+          when 9: caflagsmask |= ATTR_STRIKEOUT;
+          when 20: caflagsmask |= FONTFAM_MASK;
+          when 53: caflagsmask |= ATTR_OVERL;
+          when 58: caflagsmask |= ATTR_ULCOLOUR;
+          when 10: caflagsmask |= ATTR_FGMASK;
+          when 11: caflagsmask |= ATTR_BGMASK;
+        }
+      }
+
+      if (!term.csi_argv_defined[0])
+        for (int a = 1; a < 90; a++)
+          set_push(a);
+      else
+        for (uint i = 0; i < term.csi_argc; i++) {
+          //printf("XTPUSHSGR[%d] %d\n", i, term.csi_argv[i]);
+          set_push(term.csi_argv[i]);
+        }
+      if ((ca.attr & caflagsmask & ATTR_FGMASK) != TRUE_COLOUR)
+        ca.truefg = 0;
+      if ((ca.attr & caflagsmask & ATTR_BGMASK) != TRUE_COLOUR)
+        ca.truebg = 0;
+      if (!(caflagsmask & ATTR_ULCOLOUR))
+        ca.ulcolr = (colour)-1;
+      // push
+      //printf("XTPUSHSGR &%llX %llX %06X %06X %06X\n", caflagsmask, ca.attr, ca.truefg, ca.truebg, ca.ulcolr);
+      push_attrs(ca, caflagsmask);
+    }
+    when CPAIR('#', '}'): { /* Pop video attributes from stack (XTPOPSGR) */
+      //printf("XTPOPSGR\n");
+      // pop
+      cattr ca;
+      cattrflags caflagsmask;
+      if (pop_attrs(&ca, &caflagsmask)) {
+        //printf("XTPOPSGR &%llX %llX %06X %06X %06X\n", caflagsmask, ca.attr, ca.truefg, ca.truebg, ca.ulcolr);
+        // merge
+        term.curs.attr.attr = (term.curs.attr.attr & ~caflagsmask)
+                              | (ca.attr & caflagsmask);
+        if ((ca.attr & caflagsmask & ATTR_FGMASK) == TRUE_COLOUR)
+          term.curs.attr.truefg = ca.truefg;
+        if ((ca.attr & caflagsmask & ATTR_BGMASK) == TRUE_COLOUR)
+          term.curs.attr.truebg = ca.truebg;
+        if (caflagsmask & ATTR_ULCOLOUR)
+          term.curs.attr.ulcolr = ca.ulcolr;
+      }
+    }
     when CPAIR('$', 'p'): { /* DECRQM: request (private) mode */
       int arg = term.csi_argv[0];
       child_printf("\e[%s%u;%u$y",
@@ -1270,6 +1614,12 @@ do_csi(uchar c)
         // Drop escape sequence from print buffer and finish printing.
         while (term.printbuf[--term.printbuf_pos] != '\e');
         term_print_finish();
+      }
+      else if (arg0 == 10 && !term.esc_mod) {
+        term_export_html(false);
+      }
+      else if (arg0 == 0 && !term.esc_mod) {
+        print_screen();
       }
     when 'g':        /* TBC: clear tabs */
       if (!arg0)
@@ -1302,8 +1652,12 @@ do_csi(uchar c)
       * and also allowed any number of rows from 24 and above to be set.
       */
       if (arg0 >= 24) {
-        win_set_chars(arg0, term.cols);
-        term.selected = false;
+        if (*cfg.suppress_win && contains(cfg.suppress_win, 24))
+          ; // skip suppressed window operation
+        else {
+          win_set_chars(arg0, term.cols);
+          term.selected = false;
+        }
       }
       else
         do_winop();
@@ -1360,6 +1714,11 @@ do_csi(uchar c)
         term.modify_other_keys = 0;
       else if (arg0 == 4)
         term.modify_other_keys = arg1;
+    when CPAIR('>', 'p'):     /* xterm: pointerMode */
+      if (arg0 == 0)
+        term.hide_mouse = false;
+      else if (arg0 == 2)
+        term.hide_mouse = true;
     when CPAIR('>', 'n'):     /* xterm: modifier key setting */
       /* only the modifyOtherKeys setting is implemented */
       if (arg0 == 4)
@@ -1446,6 +1805,15 @@ do_csi(uchar c)
       term.locator_right = arg3 ?: x;
       term.locator_rectangle = true;
     }
+    when 'q': {  /* DECLL: load keyboard LEDs */
+      if (arg0 > 20)
+        win_led(arg0 - 20, false);
+      else if (arg0)
+        win_led(arg0, true);
+      else {
+        win_led(0, false);
+      }
+    }
   }
 }
 
@@ -1466,17 +1834,31 @@ do_dcs(void)
   int x0, y0;
   int attr0;
   int left, top, width, height, pixelwidth, pixelheight;
-  sixel_state_t *st;
+  sixel_state_t *st = 0;
 
   switch (term.dcs_cmd) {
   when 'q':
 
     st = (sixel_state_t *)term.imgs.parser_state;
 
+// Revert https://github.com/mintty/mintty/commit/fe48cdc
+// "fixed SIXEL colour registers handling"
+// which led to Sixel display silently failing 
+// or even stalling mintty window (#740)
+#define fixsix
+
+#ifndef fixsix
+#warning Sixel display bug #740 reenabled
+#endif
+
     switch (term.state) {
     when DCS_PASSTHROUGH:
       if (!st)
         return;
+#ifdef fixsix
+      if (!st->image.data)
+        return;
+#endif
       status = sixel_parser_parse(st, (unsigned char *)s, term.cmd_len);
       if (status < 0) {
         sixel_parser_deinit(st);
@@ -1489,6 +1871,10 @@ do_dcs(void)
     when DCS_ESCAPE:
       if (!st)
         return;
+#ifdef fixsix
+      if (!st->image.data)
+        return;
+#endif
       status = sixel_parser_parse(st, (unsigned char *)s, term.cmd_len);
       if (status < 0) {
         sixel_parser_deinit(st);
@@ -1497,11 +1883,15 @@ do_dcs(void)
         return;
       }
 
+#ifdef fixsix
+      status = sixel_parser_finalize(st);
+#else
       pixels = (unsigned char *)malloc(st->image.width * st->image.height * 4);
       if (!pixels)
         return;
 
       status = sixel_parser_finalize(st, pixels);
+#endif
       if (status < 0) {
         sixel_parser_deinit(st);
         free(term.imgs.parser_state);
@@ -1509,7 +1899,12 @@ do_dcs(void)
         return;
       }
 
+#ifdef fixsix
+      pixels = (unsigned char *)st->image.data;
+      st->image.data = NULL;
+#else
       sixel_parser_deinit(st);
+#endif
 
       left = term.curs.x;
       top = term.virtuallines + (term.sixel_display ? 0: term.curs.y);
@@ -1563,25 +1958,28 @@ do_dcs(void)
       } else {
         for (cur = term.imgs.first; cur; cur = cur->next) {
           if (cur->pixelwidth == cur->width * st->grid_width &&
-              cur->pixelheight == cur->height * st->grid_height) {
+              cur->pixelheight == cur->height * st->grid_height)
+          {
             if (img->top == cur->top && img->left == cur->left &&
                 img->width == cur->width &&
-                img->height == cur->height) {
-                memcpy(cur->pixels, img->pixels, img->pixelwidth * img->pixelheight * 4);
-                winimg_destroy(img);
-                return;
+                img->height == cur->height)
+            {
+              memcpy(cur->pixels, img->pixels, img->pixelwidth * img->pixelheight * 4);
+              winimg_destroy(img);
+              return;
             }
             if (img->top >= cur->top && img->left >= cur->left &&
                 img->left + img->width <= cur->left + cur->width &&
-                img->top + img->height <= cur->top + cur->height) {
-                for (y = 0; y < img->pixelheight; ++y)
-                  memcpy(cur->pixels +
-                           ((img->top - cur->top) * st->grid_height + y) * cur->pixelwidth * 4 +
-                           (img->left - cur->left) * st->grid_width * 4,
-                         img->pixels + y * img->pixelwidth * 4,
-                         img->pixelwidth * 4);
-                winimg_destroy(img);
-                return;
+                img->top + img->height <= cur->top + cur->height)
+            {
+              for (y = 0; y < img->pixelheight; ++y)
+                memcpy(cur->pixels +
+                         ((img->top - cur->top) * st->grid_height + y) * cur->pixelwidth * 4 +
+                         (img->left - cur->left) * st->grid_width * 4,
+                       img->pixels + y * img->pixelwidth * 4,
+                       img->pixelwidth * 4);
+              winimg_destroy(img);
+              return;
             }
           }
         }
@@ -1597,7 +1995,14 @@ do_dcs(void)
         st = term.imgs.parser_state = calloc(1, sizeof(sixel_state_t));
         sixel_parser_set_default_color(st);
       }
+#ifdef fixsix
+      status = sixel_parser_init(st,
+                                 (fg & 0xff) << 16 | (fg & 0xff00) | (fg & 0xff0000) >> 16,
+                                 (bg & 0xff) << 16 | (bg & 0xff00) | (bg & 0xff0000) >> 16,
+                                 term.private_color_registers);
+#else
       status = sixel_parser_init(st, fg, bg, term.private_color_registers);
+#endif
       if (status < 0)
         return;
     }
@@ -1606,7 +2011,7 @@ do_dcs(void)
     switch (term.state) {
     when DCS_ESCAPE:
       if (!strcmp(s, "m")) { // SGR
-        char buf[64], *p = buf;
+        char buf[76], *p = buf;
         p += sprintf(p, "\eP1$r0");
 
         if (attr.attr & ATTR_BOLD)
@@ -1615,8 +2020,17 @@ do_dcs(void)
           p += sprintf(p, ";2");
         if (attr.attr & ATTR_ITALIC)
           p += sprintf(p, ";3");
-        if (attr.attr & ATTR_UNDER)
+
+        if (attr.attr & ATTR_BROKENUND)
+          if (attr.attr & ATTR_DOUBLYUND)
+            p += sprintf(p, ";4:5");
+          else
+            p += sprintf(p, ";4:4");
+        else if ((attr.attr & UNDER_MASK) == ATTR_CURLYUND)
+          p += sprintf(p, ";4:3");
+        else if (attr.attr & ATTR_UNDER)
           p += sprintf(p, ";4");
+
         if (attr.attr & ATTR_BLINK)
           p += sprintf(p, ";5");
         if (attr.attr & ATTR_BLINK2)
@@ -1627,8 +2041,10 @@ do_dcs(void)
           p += sprintf(p, ";8");
         if (attr.attr & ATTR_STRIKEOUT)
           p += sprintf(p, ";9");
-        if (attr.attr & ATTR_DOUBLYUND)
+        if ((attr.attr & UNDER_MASK) == ATTR_DOUBLYUND)
           p += sprintf(p, ";21");
+        if (attr.attr & ATTR_FRAMED)
+          p += sprintf(p, ";51;52");
         if (attr.attr & ATTR_OVERL)
           p += sprintf(p, ";53");
 
@@ -1643,23 +2059,34 @@ do_dcs(void)
         uint fg = (attr.attr & ATTR_FGMASK) >> ATTR_FGSHIFT;
         if (fg != FG_COLOUR_I) {
           if (fg >= TRUE_COLOUR)
-            p += sprintf(p, ";38;2;%u;%u;%u", attr.truefg & 0xFF, 
+            //p += sprintf(p, ";38;2;%u;%u;%u", attr.truefg & 0xFF, 
+            //             (attr.truefg >> 8) & 0xFF, (attr.truefg >> 16) & 0xFF);
+            p += sprintf(p, ";38:2::%u:%u:%u", attr.truefg & 0xFF, 
                          (attr.truefg >> 8) & 0xFF, (attr.truefg >> 16) & 0xFF);
           else if (fg < 16)
             p += sprintf(p, ";%u", (fg < 8 ? 30 : 90) + (fg & 7));
           else
-            p += sprintf(p, ";38;5;%u", fg);
+            //p += sprintf(p, ";38;5;%u", fg);
+            p += sprintf(p, ";38:5:%u", fg);
         }
 
         uint bg = (attr.attr & ATTR_BGMASK) >> ATTR_BGSHIFT;
         if (bg != BG_COLOUR_I) {
           if (bg >= TRUE_COLOUR)
-            p += sprintf(p, ";48;2;%u;%u;%u", attr.truebg & 0xFF, 
+            //p += sprintf(p, ";48;2;%u;%u;%u", attr.truebg & 0xFF, 
+            //             (attr.truebg >> 8) & 0xFF, (attr.truebg >> 16) & 0xFF);
+            p += sprintf(p, ";48:2::%u:%u:%u", attr.truebg & 0xFF, 
                          (attr.truebg >> 8) & 0xFF, (attr.truebg >> 16) & 0xFF);
           else if (bg < 16)
             p += sprintf(p, ";%u", (bg < 8 ? 40 : 100) + (bg & 7));
           else
-            p += sprintf(p, ";48;5;%u", bg);
+            //p += sprintf(p, ";48;5;%u", bg);
+            p += sprintf(p, ";48:5:%u", bg);
+        }
+
+        if (attr.attr & ATTR_ULCOLOUR) {
+          p += sprintf(p, ";58:2::%u:%u:%u", attr.ulcolr & 0xFF, 
+                       (attr.ulcolr >> 8) & 0xFF, (attr.ulcolr >> 16) & 0xFF);
         }
 
         p += sprintf(p, "m\e\\");  // m for SGR, followed by ST
@@ -1677,6 +2104,10 @@ do_dcs(void)
         child_printf("\eP1$r%u q\e\\", 
                      (term.cursor_type >= 0 ? term.cursor_type * 2 : 0) + 1
                      + !(term.cursor_blinks & 1));
+      } else if (!strcmp(s, "t") && term.rows >= 24) {  // DECSLPP (lines)
+        child_printf("\eP1$r%ut\e\\", term.rows);
+      } else if (!strcmp(s, "$|")) {  // DECSCPP (columns)
+        child_printf("\eP1$r%u$|\e\\", term.cols);
       } else {
         child_printf("\eP0$r%s\e\\", s);
       }
@@ -1781,6 +2212,11 @@ do_cmd(void)
 {
   char *s = term.cmd_buf;
   s[term.cmd_len] = 0;
+  //printf("OSC %d <%s>\n", term.cmd_num, s);
+
+  if (*cfg.suppress_osc && contains(cfg.suppress_osc, term.cmd_num))
+    // skip suppressed OSC command
+    return;
 
   switch (term.cmd_num) {
     when 0 or 2: win_set_title(s);  // ignore icon title
@@ -1795,7 +2231,16 @@ do_cmd(void)
     when 104: do_colour_osc(true, 4, true);
     when 105: do_colour_osc(true, 5, true);
     when 10:  do_colour_osc(false, FG_COLOUR_I, false);
-    when 11:  do_colour_osc(false, BG_COLOUR_I, false);
+    when 11:  if (strchr("*_%=", *term.cmd_buf)) {
+                wchar * bn = cs__mbstowcs(term.cmd_buf);
+                wstrset(&cfg.background, bn);
+                free(bn);
+                if (*term.cmd_buf == '%')
+                  scale_to_image_ratio();
+                win_invalidate_all(true);
+              }
+              else
+                do_colour_osc(false, BG_COLOUR_I, false);
     when 12:  do_colour_osc(false, CURSOR_COLOUR_I, false);
     when 17:  do_colour_osc(false, SEL_COLOUR_I, false);
     when 19:  do_colour_osc(false, SEL_TEXT_COLOUR_I, false);
@@ -1820,7 +2265,20 @@ do_cmd(void)
       else
         cs_set_locale(s);
     when 7721:  // Copy window title to clipboard.
-        win_copy_title();
+      win_copy_title();
+    when 7773: {  // Change icon.
+      uint icon_index = 0;
+      char *comma = strrchr(s, ',');
+      if (comma) {
+        char *start = comma + 1, *end;
+        icon_index = strtoul(start, &end, 0);
+        if (start != end && !*end)
+          *comma = 0;
+        else
+          icon_index = 0;
+      }
+      win_set_icon(s, icon_index);
+    }
     when 7770:  // Change font size.
       if (!strcmp(s, "?"))
         child_printf("\e]7770;%u\e\\", win_get_font_size());
@@ -1907,37 +2365,14 @@ term_print_finish(void)
   }
 }
 
-/* Empty the input buffer */
-void
-term_flush(void)
+static void
+term_do_write(const char *buf, uint len)
 {
-  term_write(term.inbuf, term.inbuf_pos);
-  free(term.inbuf);
-  term.inbuf = 0;
-  term.inbuf_pos = 0;
-  term.inbuf_size = 0;
-}
-
-void
-term_write(const char *buf, uint len)
-{
- /*
-  * During drag-selects, we do not process terminal input,
-  * because the user will want the screen to hold still to be selected.
-  */
-  if (term_selecting()) {
-    if (term.inbuf_pos + len > term.inbuf_size) {
-      term.inbuf_size = max(term.inbuf_pos, term.inbuf_size * 4 + 4096);
-      term.inbuf = renewn(term.inbuf, term.inbuf_size);
-    }
-    memcpy(term.inbuf + term.inbuf_pos, buf, len);
-    term.inbuf_pos += len;
-    return;
-  }
-
   // Reset cursor blinking.
   term.cblinker = 1;
   term_schedule_cblink();
+
+  short oldy = term.curs.y;
 
   uint pos = 0;
   while (pos < len) {
@@ -2067,6 +2502,12 @@ term_write(const char *buf, uint len)
           continue;
         }
 
+        // Non-characters
+        if (wc == 0xFFFE || wc == 0xFFFF) {
+          write_error();
+          continue;
+        }
+
         cattrflags asav = term.curs.attr.attr;
 
         // Everything else
@@ -2094,7 +2535,18 @@ term_write(const char *buf, uint len)
           width = xcwidth(wc);
 #endif
 
-        wchar NRC(wchar * map) {
+        if (width == 2
+            // && wcschr(W("〈〉《》「」『』【】〒〓〔〕〖〗〘〙〚〛"), wc)
+            && wc >= 0x3008 && wc <= 0x301B && (wc | 1) != 0x3013
+            && win_char_width(wc) < 2
+            // ensure symmetric handling of matching brackets
+            && win_char_width(wc ^ 1) < 2)
+        {
+          term.curs.attr.attr |= ATTR_EXPAND;
+        }
+
+        wchar NRC(wchar * map)
+        {
           static char * rpl = "#@[\\]^_`{|}~";
           char * match = strchr(rpl, c);
           if (match)
@@ -2131,26 +2583,23 @@ term_write(const char *buf, uint len)
             }
           when CSET_TECH:  // DEC Technical character set
             if (c > ' ' && c < 0x7F) {
-              // = W("⎷┌─⌠⌡│⎡⎣⎤⎦⎛⎝⎞⎠⎨⎬␦␦╲╱␦␦␦␦␦␦␦≤≠≥∫∴∝∞÷Δ∇ΦΓ∼≃Θ×Λ⇔⇒≡ΠΨ␦Σ␦␦√ΩΞΥ⊂⊃∩∪∧∨¬αβχδεφγηιθκλ␦ν∂πψρστ␦ƒωξυζ←↑→↓")
-              // = W("⎷┌─⌠⌡│⎡⎣⎤⎦⎛⎝⎞⎠⎨⎬╶╶╲╱╴╴╳␦␦␦␦≤≠≥∫∴∝∞÷Δ∇ΦΓ∼≃Θ×Λ⇔⇒≡ΠΨ␦Σ␦␦√ΩΞΥ⊂⊃∩∪∧∨¬αβχδεφγηιθκλ␦ν∂πψρστ␦ƒωξυζ←↑→↓")
-              wc = W("⎷┌─⌠⌡│⎡⎣⎤⎦⎧⎩⎫⎭⎨⎬╶╶╲╱╴╴╳␦␦␦␦≤≠≥∫∴∝∞÷Δ∇ΦΓ∼≃Θ×Λ⇔⇒≡ΠΨ␦Σ␦␦√ΩΞΥ⊂⊃∩∪∧∨¬αβχδεφγηιθκλ␦ν∂πψρστ␦ƒωξυζ←↑→↓")
+              // = W("⎷┌─⌠⌡│⎡⎣⎤⎦⎛⎝⎞⎠⎨⎬￿￿╲╱￿￿￿￿￿￿￿≤≠≥∫∴∝∞÷Δ∇ΦΓ∼≃Θ×Λ⇔⇒≡ΠΨ￿Σ￿￿√ΩΞΥ⊂⊃∩∪∧∨¬αβχδεφγηιθκλ￿ν∂πψρστ￿ƒωξυζ←↑→↓")
+              // = W("⎷┌─⌠⌡│⎡⎣⎤⎦⎛⎝⎞⎠⎨⎬╶╶╲╱╴╴╳￿￿￿￿≤≠≥∫∴∝∞÷Δ∇ΦΓ∼≃Θ×Λ⇔⇒≡ΠΨ￿Σ￿￿√ΩΞΥ⊂⊃∩∪∧∨¬αβχδεφγηιθκλ￿ν∂πψρστ￿ƒωξυζ←↑→↓")
+              wc = W("⎷┌─⌠⌡│⎡⎣⎤⎦⎧⎩⎫⎭⎨⎬╶╶╲╱╴╴╳￿￿￿￿≤≠≥∫∴∝∞÷Δ∇ΦΓ∼≃Θ×Λ⇔⇒≡ΠΨ￿Σ￿￿√ΩΞΥ⊂⊃∩∪∧∨¬αβχδεφγηιθκλ￿ν∂πψρστ￿ƒωξυζ←↑→↓")
                    [c - ' ' - 1];
               if (c <= 0x37) {
                 static uchar techdraw_code[23] = {
-                  0x80,                    // square root base
+                  0xE0,                    // square root base
                   0, 0, 0, 0, 0,
-                  0x88, 0x89, 0x8A, 0x8B,  // square bracket corners
+                  0xE8, 0xE9, 0xEA, 0xEB,  // square bracket corners
                   0, 0, 0, 0,              // curly bracket hooks
                   0, 0,                    // curly bracket middle pieces
-                  0x81, 0x82, 0, 0, 0x85, 0x86, 0x87  // sum segments
+                  0xE1, 0xE2, 0, 0, 0xE5, 0xE6, 0xE7  // sum segments
                 };
                 uchar dispcode = techdraw_code[c - 0x21];
                 term.curs.attr.attr |= ((cattrflags)dispcode) << ATTR_GRAPH_SHIFT;
               }
             }
-          when CSET_GBCHR:  // NRC United Kingdom
-            if (c == '#')
-              wc = 0xA3; // pound sign
           when CSET_NL:
             wc = NRC(W("£¾ĳ½|^_`¨ƒ¼´"));  // Dutch
           when CSET_FI:
@@ -2176,11 +2625,74 @@ term_write(const char *buf, uint len)
           when CSET_DECSPGR   // DEC Supplemental Graphic
             or CSET_DECSUPP:  // DEC Supplemental (user-preferred in VT*)
             if (c > ' ' && c < 0x7F) {
-              wc = W("¡¢£␦¥␦§¤©ª«␦␦␦␦°±²³␦µ¶·␦¹º»¼½␦¿ÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏ␦ÑÒÓÔÕÖŒØÙÚÛÜŸ␦ßàáâãäåæçèéêëìíîï␦ñòóôõöœøùúûüÿ␦")
+              wc = W("¡¢£￿¥￿§¤©ª«￿￿￿￿°±²³￿µ¶·￿¹º»¼½￿¿ÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏ￿ÑÒÓÔÕÖŒØÙÚÛÜŸ￿ßàáâãäåæçèéêëìíîï￿ñòóôõöœøùúûüÿ￿")
                    [c - ' ' - 1];
+            }
+          // 96-character sets (UK / xterm 336)
+          when CSET_GBCHR:  // NRC United Kingdom
+            if (c >= ' ' && c <= 0x7F) {
+              wc = W(" ¡¢£¤¥¦§¨©ª«¬­®¯°±²³´µ¶·¸¹º»¼½¾¿ÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖ×ØÙÚÛÜÝÞßàáâãäåæçèéêëìíîïðñòóôõö÷øùúûüýþÿ")
+                   [c - ' '];
+            }
+          when CSET_ISO_Latin_Cyrillic:
+            if (c >= ' ' && c <= 0x7F) {
+              wc = W(" ЁЂЃЄЅІЇЈЉЊЋЌ­ЎЏАБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдежзийклмнопрстуфхцчшщъыьэюя№ёђѓєѕіїјљњћќ§ўџ")
+                   [c - ' '];
+            }
+          when CSET_ISO_Greek_Supp:
+            if (c >= ' ' && c <= 0x7F) {
+              wc = W(" ‘’£€₯¦§¨©ͺ«¬­￿―°±²³΄΅Ά·ΈΉΊ»Ό½ΎΏΐΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡ￿ΣΤΥΦΧΨΩΪΫάέήίΰαβγδεζηθικλμνξοπρςστυφχψωϊϋόύώ")
+                   [c - ' '];
+            }
+          when CSET_ISO_Hebrew:
+            if (c >= ' ' && c <= 0x7F) {
+              wc = W(" ￿¢£¤¥¦§¨©×«¬­®¯°±²³´µ¶·¸¹÷»¼½¾￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿‗אבגדהוזחטיךכלםמןנסעףפץצקרשת￿￿‎‏")
+                   [c - ' '];
+            }
+          when CSET_ISO_Latin_5:
+            if (c >= ' ' && c <= 0x7F) {
+              wc = W(" ¡¢£¤¥¦§¨©ª«¬­®¯°±²³´µ¶·¸¹º»¼½¾¿ÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏĞÑÒÓÔÕÖ×ØÙÚÛÜİŞßàáâãäåæçèéêëìíîïğñòóôõö÷øùúûüışÿ")
+                   [c - ' '];
+            }
+          when CSET_DEC_Greek_Supp:
+            if (c >= ' ' && c <= 0x7F) {
+              wc = W(" ¡¢£￿¥￿§¤©ª«￿￿￿￿°±²³￿µ¶·￿¹º»¼½￿¿ϊΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟ￿ΠΡΣΤΥΦΧΨΩάέήί￿όϋαβγδεζηθικλμνξο￿πρστυφχψωςύώ΄￿")
+                   [c - ' '];
+            }
+          when CSET_DEC_Hebrew_Supp:
+            if (c >= ' ' && c <= 0x7F) {
+              wc = W(" ¡¢£￿¥￿§¨©×«￿￿￿￿°±²³￿µ¶·￿¹÷»¼½￿¿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿￿אבגדהוזחטיךכלםמןנסעףפץצקרשת￿￿￿￿")
+                   [c - ' '];
+            }
+          when CSET_DEC_Turkish_Supp:
+            if (c >= ' ' && c <= 0x7F) {
+              wc = W(" ¡¢£￿¥￿§¨©ª«￿￿İ￿°±²³￿µ¶·￿¹º»¼½ı¿ÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏĞÑÒÓÔÕÖŒØÙÚÛÜŸŞßàáâãäåæçèéêëìíîïğñòóôõöœøùúûüÿş")
+                   [c - ' '];
+            }
+          when CSET_NRCS_Greek:
+            if (c >= ' ' && c <= 0x7F) {
+              wc = W(" !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`ΑΒΓΔΕΖΗΘΙΚΛΜΝΧΟΠΡΣΤΥΦΞΨΩ￿￿{|}~")
+                   [c - ' '];
+            }
+          when CSET_NRCS_Hebrew:
+            if (c >= ' ' && c <= 0x7F) {
+              wc = W(" !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_אבגדהוזחטיךכלםמןנסעףפץצקרשת{|}~")
+                   [c - ' '];
+            }
+          when CSET_NRCS_Turkish:
+            if (c >= ' ' && c <= 0x7F) {
+              wc = W(" !\"#$%ğ'()*+,-./0123456789:;<=>?İABCDEFGHIJKLMNOPQRSTUVWXYZŞÖÇÜ_Ğabcdefghijklmnopqrstuvwxyzşöçü")
+                   [c - ' '];
             }
           otherwise: ;
         }
+
+        if (wc >= 0x2580 && wc <= 0x259F) {
+          // Block Elements (U+2580-U+259F)
+          // ▀▁▂▃▄▅▆▇█▉▊▋▌▍▎▏▐░▒▓▔▕▖▗▘▙▚▛▜▝▞▟
+          term.curs.attr.attr |= ((cattrflags)(wc & 0xFF)) << ATTR_GRAPH_SHIFT;
+        }
+
         write_char(wc, width);
         term.curs.attr.attr = asav;
       } // end term_write switch (term.state) when NORMAL
@@ -2215,6 +2727,14 @@ term_write(const char *buf, uint len)
         if (c < 0x20)
           do_ctrl(c);
         else if (c == ';') {
+          if (term.csi_argc < lengthof(term.csi_argv))
+            term.csi_argc++;
+        }
+        else if (c == ':') {
+          // support colon-separated sub parameters as specified in
+          // ISO/IEC 8613-6 (ITU Recommendation T.416)
+          uint i = term.csi_argc - 1;
+          term.csi_argv[i] |= SUB_PARS;
           if (term.csi_argc < lengthof(term.csi_argv))
             term.csi_argc++;
         }
@@ -2253,6 +2773,15 @@ term_write(const char *buf, uint len)
           when 'R':  /* Linux palette reset */
             win_reset_colours();
             term.state = NORMAL;
+          when 'I':  /* OSC set icon file (dtterm, shelltool) */
+            term.cmd_num = 7773;
+            term.state = OSC_NUM;
+          when 'L':  /* OSC set icon label (dtterm, shelltool) */
+            term.cmd_num = 1;
+            term.state = OSC_NUM;
+          when 'l':  /* OSC set window title (dtterm, shelltool) */
+            term.cmd_num = 2;
+            term.state = OSC_NUM;
           when '0' ... '9':  /* OSC command number */
             term.cmd_num = c - '0';
             term.state = OSC_NUM;
@@ -2433,6 +2962,11 @@ term_write(const char *buf, uint len)
     }
   }
 
+  if (cfg.ligatures_support > 1) {
+    // refresh ligature rendering in old cursor line
+    term_invalidate(0, oldy, term.cols - 1, oldy);
+  }
+
   // Update search match highlighting
   //term_schedule_search_partial_update();
   term_schedule_search_update();
@@ -2446,3 +2980,50 @@ term_write(const char *buf, uint len)
     term.printbuf_pos = 0;
   }
 }
+
+/* Empty the input buffer */
+void
+term_flush(void)
+{
+  if (term.suspbuf) {
+    term_do_write(term.suspbuf, term.suspbuf_pos);
+    free(term.suspbuf);
+    term.suspbuf = 0;
+    term.suspbuf_pos = 0;
+    term.suspbuf_size = 0;
+  }
+}
+
+void
+term_write(const char *buf, uint len)
+{
+ /*
+    During drag-selects, we do not wish to process terminal output,
+    because the user will want the screen to hold still to be selected.
+    Therefore, we maintain a suspend-output-on-selection buffer which 
+    can grow up to a moderate size.
+  */
+  if (term_selecting()) {
+#define suspmax 88800
+#define suspdelta 888
+    // if buffer size would be exceeded, flush; prevent uint overflow
+    if (len > suspmax - term.suspbuf_pos)
+      term_flush();
+    // if buffer length does not exceed max size, append output
+    if (len <= suspmax - term.suspbuf_pos) {
+      // make sure buffer is large enough
+      if (term.suspbuf_pos + len > term.suspbuf_size) {
+        term.suspbuf_size += suspdelta;
+        term.suspbuf = renewn(term.suspbuf, term.suspbuf_size);
+      }
+      memcpy(term.suspbuf + term.suspbuf_pos, buf, len);
+      term.suspbuf_pos += len;
+      return;
+    }
+    // if we cannot buffer, output directly;
+    // in this case, we've either flushed already or didn't need to
+  }
+
+  term_do_write(buf, len);
+}
+

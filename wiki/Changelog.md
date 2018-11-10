@@ -1,10 +1,264 @@
+Terminal features
+  * Copy as HTML (#811).
+  * Mitigate stalling on very long paste buffer lines (#810).
+  * New CSI DECLL (VT100, xterm) to switch keyboard LEDs (and their associated modifier function).
+  * New CSI > 0/2 p to switch option HideMouse (xterm pointerMode).
+
+Appearance
+  * Option Background== for floating window effect (using desktop wallpaper as background) (#18, ~#666, ~~#501).
+
+Window handling
+  * Consider glyph width for font width determination (#808).
+  * Do not start process to construct process list for exit confirmation (~#448).
+  * Enhanced taskbar icon grouping behaviour (#784, mintty/wsltty#96, ?#495, ?#420, ??#801).
+  * Setting MINTTY_SHORTCUT when started from a desktop shortcut.
+  * Maintain proper terminal size after DPI change in DPI awareness mode V2 (#774).
+
+Configuration
+  * AppID supports placeholders for flexible customization of taskbar icon grouping behaviour (#784, mintty/wsltty#96, ?#495, ?#420, ??#801).
+
+### 2.9.3 (4 October 2018) ###
+
+Terminal features
+  * Fixed failing recognition of single-char ESC sequences.
+
+Terminal interaction
+  * Enhanced ligature support redisplays previous cursor line (#601, mintty/wsltty#123).
+  * Support switching rectangular mode while mouse-dragging selection.
+
+Configuration
+  * Option Enable132ColumnSwitching to enable 132/80-column switching initially (#196).
+  * Option value LigaturesSupport=2 (#601, mintty/wsltty#123).
+
+### 2.9.2 (3 October 2018) ###
+
+Terminal interaction
+  * Fixed space consideration for wrap/resize/copy handling (#800, ~#82).
+  * Optionally include trailing space in selection (~#768, ~#800).
+  * Reduced occasional flickering by buffering terminal input (#799).
+  * Sanitized output buffering during selection (~#799).
+  * Ligatures display support while being input (mintty/wsltty#123, #601).
+  * Optionally suppress mouse wheel effects (#170).
+
+Terminal features
+  * Additional 96-character NRCS (xterm 336).
+  * Fixed "Latin-1/UK" NRCS.
+
+Window handling
+  * OSC I to set icon from file (shelltool, dtterm, xterm 333).
+  * OSC l to set window title (shelltool, dtterm, xterm 333).
+
+Configuration
+  * Option LigaturesSupport (mintty/wsltty#123, #601).
+  * Option SuppressMouseWheel (#170).
+  * Option TrimSelection (~#768, ~#800).
+  * Support multi-line splitting for all key:value list options.
+
+### 2.9.1 (20 September 2018) ###
+
+Highlights (details see below)
+  * User-defined key shortcuts.
+
+  * Catch-up with escape control sequences recently introduced by xterm.
+  * Tweaks and fixes for window manipulation and other escape sequences.
+  * Generic options to suppress various attributes and feature sets.
+  * HTML Screen Dump function.
+
+  * Optionally scale window to aspect ratio of background image.
+  * Mouse handling enhancements.
+  * Always allow switching scrollbar; do not switch on terminal reset (like xterm).
+  * Keyboard AltGr workaround for buggy TeamViewer.
+
+Terminal features
+  * Avoid overwriting last column by clear-to-end-of-line/screen in pending auto-wrap state (#781).
+  * Fix maximize vertically/horizontally (preserve width/height) and restore properly.
+  * Fixed CSI 5/6/9/10 t default handling, preventing accidental window modification.
+  * Fixed CSI 13/19 t to report multi-monitor virtual screen size without padding (like xterm).
+  * New CSI 13;2/14;2/15/16 t (xterm 332/333).
+  * New CSI # {/} XTPUSHSGR and XTPOPSGR push/pop character attributes (xterm 334, extended).
+  * New CSI 0 i print screen.
+  * Keeping wrapped line selection copy together after window has been resized (~#82).
+  * Terminal soft reset resets cursor blinking (xterm 334).
+  * DECSET 66 for application keypad.
+  * Added DECSCPP and DECSLPP to DECRQSS (xterm 334).
+  * Generic option to suppress character attributes (#468, ~#478, #777, ~#459).
+  * Generic option to suppress DEC private mode switching.
+  * Generic options to suppress window operations and configuration commands.
+  * Optional filtering of pasted text (#768).
+
+Keyboard handling
+  * User-defined key shortcuts and function keys (#705, #602, #645, #399, #252, ~#726, ~#524, ~#451, ~#523).
+  * Workaround for buggy TeamViewer (#783).
+  * Guarding Alt handling from AltGr detection (#790).
+  * VT220 keyboard toggle function for extended menu and user-defined keys.
+
+Window handling
+  * When suppressing focus-in mouse click event, also suppress the mouse release event (#782, #717).
+  * After suppressing focus-in mouse click event, avoid subsequent false double-click report (#717).
+  * Elastic mouse text selection includes only characters dragged more than halfway (#308).
+  * Clearing hover highlighting as appropriate.
+  * Tweaked selection size hint positioning (#660).
+  * Optionally scale window to aspect ratio of background image (#18, #666).
+  * Always allow switching scrollbar; do not switch on terminal reset (like xterm).
+
+Desktop / taskbar integration
+  * Partially withdrawn 2.9.0 patch to keep WSL windows together in Windows task bar (mintty/wsltty#96).
+  * AppID (to group taskbar icons) is derived from WSL distro only with setting AppID=@ (#784, ~mintty/wsltty#96).
+
+Configuration
+  * New tool option `mintheme --save` to save theme in config file (#794).
+  * Option ElasticMouse=true to not select characters only slightly touched (#308).
+  * Option KeyFunctions for user-defined shortcuts and function keys (#705, #602, #645, #399, #252, ~#726, ~#524, ~#451, ~#523).
+  * Special option setting AppID=@ to derive taskbar grouping implicitly from WSL distro name (#784, ~mintty/wsltty#96).
+  * Support for Windows pathnames in background filenames (#18, #666).
+  * Option to scale window to aspect ratio of background image (#18, #666).
+  * New option value -RW to list installed WSL distributions and properties.
+  * Option CtrlAltDelayAltGr for relaxed AltGr detection (#783).
+  * Option SuppressSGR to suppress character attributes (#468, ~#478, #777, ~#459).
+  * Option SuppressDEC to suppress DEC private mode switching.
+  * Option SuppressWIN to suppress window operations.
+  * Option SuppressOSC to suppress window configuration commands (~#385).
+  * Option FilterPasteControls to filter pasted text (#768).
+
+Other
+  * HTML Screen Dump function (extended context menu or escape sequence).
+  * Detect cygwin version for handling of @cjkwide locale modifier.
+  * For illegal encoding, use REPLACEMENT CHARACTER if available.
+  * Withdrawn Wyse cursor style modes SM 33/34 (#787).
+
+### 2.9.0 (1 July 2018) ###
+
+Highlights (details see below)
+  * Background image and texture support.
+  * Enhanced multi-monitor DPI handling.
+  * Underline styles and colours, CMYK colour specifications.
+  * Outer scrollbar mode, xterm-compatible.
+  * Enhanced text selection mouse support.
+  * Enhanced quick window switching.
+  * Tweaked start error handling.
+  * Tweaked WSL support.
+
+Character attributes and rendering
+  * Support for colon-separated SGR sub-parameters (ISO/IEC 8613-6) (xterm 282):
+  * SGR escapes for ISO/IEC 8613-6 RGB, CMY, CMYK, and indexed colour formats.
+  * DECRQSS uses SGR sub-parameters for colour specifications (xterm 331).
+  * SGR 4:1...4:5 for underline styles solid, double, wavy, dotted, dashed.
+  * SGR 58/59 for underline colour (kitty, iTerm2).
+  * Fixed (almost) selection highlighting of emojis.
+  * Drawing Unicode Block Elements which are broken in many fonts (#264).
+  * Fixed initial bold as font suppression glitch (mintty/wsltty#103).
+
+Window control
+  * DECSET 30 to enable/disable outer scrollbar (like xterm) (#159, ~#262).
+  * DECSET 1046 enables/disables alternate screen switching (xterm 331).
+  * Cursor style modes DECSET 12 (AT&T 610) (xterm 331) and SM 33/34 (Wyse).
+
+Scrollbar
+  * Fixed scrollbar toggle (Ctrl+Shift+O) from forcing scrollbar to the right.
+  * Preventing font zooming after scrollbar toggle (Ctrl+Shift+O).
+
+Window layout
+  * Background image or texture support (#18, #666).
+
+Multi-monitor support
+  * Using Windows DPI handling V2, avoiding fluttering (#774, #470, #492, ~#566, ~#547).
+
+Text selection
+  * Drag-and-drop selection after focus click enabled by combined cell and time distance (#717).
+  * Only suppress focus-click selection if focus reporting disabled or mouse reporting not effective (#717).
+  * Ctrl+mouse-move hovering underlines URLs and filenames (#173).
+  * Selection highlighting can also indicate selection size (#660).
+
+Window handling
+  * Revised Ctrl+(Shift+)Tab window switching (#773).
+  * Ctrl+Ctrl+(Shift+)Tab for window switching including iconized windows (#735).
+  * Win+Shift move coupling of tab sets if SessionGeomSync ≥ 2 (#600, #699).
+  * Keeping WSL windows together in Windows task bar (mintty/wsltty#96).
+
+Configuration
+  * CMY(K) colour specifications in OSC sequences and config file.
+  * Option Background and OSC 11 to set background image or texture (#18, #666).
+  * Option SelectionShowSize to enable selection size indication (#660).
+
+Themes management
+  * Fixed syntax error in `mintheme` tool (#764).
+  * Option `mintheme -d -q` for decimal colour format (#718).
+  * Supporting `mintheme` tool on WSL.
+  * Options `mintheme -p` and `mintheme -t` to set background picture or texture.
+  * Options `mintheme -s` and `mintheme -S` for theme visualization and comparison.
+
+Other
+  * Updated Emoji data and built-in width data to Unicode 11.0.
+  * Enabled OSC 7 current directory injection for Ctrl+click in WSL (mintty/wsltty#104, mintty/wsltty#19).
+  * Reporting start error (exit status 255) (#745).
+  * Changed start error exit code from 255 to 126 (#745).
+  * Fixed slowdown of Character Info mode if Unicode data are not deployed.
+  * Option --WSLmode to tune behaviour for WSL distro but not launch (mintty/wsltty#99).
+  * WSLtty appx mode triggered statically or dynamically (mintty/wsltty.appx#3).
+  * Clarified additional configuration requirements for option TaskCommands in the manual.
+
+### 2.8.5 (14 Apr 2018) ###
+
 Character handling and rendering
-  * Emoji support (wsltty#82, #600, ~#671, ~#430).
+  * CJK brackets are expanded if needed to ensure their symmetry (#756).
+  * Support of emoji style text attribute SGR 51/52 (mintty/wsltty#82, #600).
+  * Fixed emoji display variation selector handling.
+  * Character Info displays emoji sequence short names (mintty/wsltty#82, #600).
+  * Reverted Sixel colour registers patch that could fail Sixel display or even stall mintty window (#740, mintty/wsltty#90).
+
+Input
+  * Reenabled Ctrl+key escape sequences (#743).
+  * Input optionally keeps selection highlighting (ClearSelectionOnInput=false) (#222).
+
+Mouse handling
+  * Reenabled drag-and-drop text selection on focussing at a threshold (~#717).
+
+Configuration
+  * Alt+F2 and mintty --dir=... stay in selected dir even in login mode (#500, #744).
+  * Fixed option --dir=...
+  * Context menu configuration (MenuMenu etc): new flags 'x' and 'u' (#755).
+  * More layout-tolerant colour value syntax (#758).
+  * Invocation as wsl*[-distro].exe implies a --WSL[=distro] parameter (mintty/wsltty#63).
+  * Added missing option `mintheme --list`.
+  * New mintheme options --file (#762) and --query.
+  * New option ClearSelectionOnInput=false disables selection highlight clearing on input (#222).
+
+Window handling
+  * Clear selection when clipboard content updated (#742).
+  * Skip refresh after colour setting if nothing changed (e.g. by prompt).
+
+Desktop integration
+  * WSL mount point configuration (/etc/wsl.conf or fstab) is considered in path conversion for open/paste (mintty/wsltty#91).
+  * Workaround for ConEmu WM_MOUSEACTIVATE bug (#724).
+
+Documentation
+  * Terminal multiplexer configuration: added tmux (#757).
+  * Search bar: activated also from context menu (#753).
+
+### 2.8.4 (10 Feb 2018) ###
+
+Character handling and rendering
+  * Emoji support (mintty/wsltty#82, #600, ~#671, ~#430).
   * Fixed double-width handling within right-to-left text.
 
 Window handling
   * Ctrl+Alt+mouse-click/drag moves the window (#729).
+  * Apply Virtual Tab position catching also on Alt+F2 (#699).
   * Workaround for Windows failing to consider the taskbar properly when maximizing with no or frame-only border (#732).
+  * Workaround for caption-less window exceeding borders (#733) on Windows 10.
+
+Mouse handling
+  * More selective suppression of mouse action on focus-click (mintty/wsltty#88, #717).
+  * Fixed mouse function in search bar (#85), broken since 2.8.2 (#717).
+
+Desktop integration
+  * Support for taskbar "Tasks" list ("jump list") (#290).
+  * Session launcher icons (#699).
+
+Configuration
+  * Options Emojis, EmojiPlacement to configure emojis style and display.
+  * Option TaskCommands to configure a taskbar icon task list ("jump list").
+  * Limit tweaking of empty shortcut start dir to Start menu case (#737).
 
 ### 2.8.3 (8 Jan 2018) ###
 
@@ -343,7 +597,7 @@ Keyboard:
 
 Other:
   * Suppressing repeated font error messages.
-  * Enabled link-click in wsltty (#164).
+  * Enabled link-click in wsltty (~#164).
 
 ### 2.7.0 (13 Nov 2016) ###
 

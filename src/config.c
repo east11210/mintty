@@ -1,5 +1,5 @@
 // config.c (part of mintty)
-// Copyright 2008-13 Andy Koppe, 2015-2016 Thomas Wolff
+// Copyright 2008-13 Andy Koppe, 2015-2017 Thomas Wolff
 // Based on code from PuTTY-0.60 by Simon Tatham and team.
 // Licensed under the terms of the GNU General Public License v3 or later.
 
@@ -45,12 +45,14 @@ const config default_cfg = {
   .cursor_colour = 0xBFBFBF,
   .underl_colour = (colour)-1,
   .underl_manual = false,
+  .hover_colour = (colour)-1,
   .sel_fg_colour = (colour)-1,
   .sel_bg_colour = (colour)-1,
   .search_fg_colour = 0x000000,
   .search_bg_colour = 0x00DDDD,
   .search_current_colour = 0x0099DD,
   .theme_file = W(""),
+  .background = W(""),
   .colour_scheme = "",
   .transparency = 0,
   .blurred = false,
@@ -73,7 +75,7 @@ const config default_cfg = {
   .show_hidden_fonts = false,
   .font_smoothing = FS_DEFAULT,
   .font_render = FR_UNISCRIBE,
-  .bold_as_font = -1,  // -1 means "the opposite of bold_as_colour"
+  .bold_as_font = false,
   .bold_as_colour = true,
   .allow_blinking = false,
   .locale = "",
@@ -83,6 +85,7 @@ const config default_cfg = {
   .backspace_sends_bs = CERASE == '\b',
   .delete_sends_del = false,
   .ctrl_alt_is_altgr = false,
+  .ctrl_alt_delay_altgr = 0,
   .old_altgr_detection = false,
   .clip_shortcuts = true,
   .window_shortcuts = true,
@@ -99,6 +102,7 @@ const config default_cfg = {
   .key_break = "",	// VK_CANCEL
   .key_menu = "",	// VK_APPS
   .key_scrlock = "",	// VK_SCROLL
+  .key_commands = W(""),
   // Mouse
   .copy_on_select = true,
   .copy_as_rtf = true,
@@ -110,6 +114,7 @@ const config default_cfg = {
   .clicks_target_app = true,
   .click_target_mod = MDK_SHIFT,
   .hide_mouse = true,
+  .elastic_mouse = false,
   // Window
   .cols = 80,
   .rows = 24,
@@ -123,6 +128,7 @@ const config default_cfg = {
   .term = "xterm",
   .answerback = W(""),
   .old_wrapmodes = false,
+  .enable_deccolm_init = false,
   .bell_sound = true,
   .bell_type = 1,
   .bell_file = W(""),
@@ -150,6 +156,15 @@ const config default_cfg = {
   // "Hidden"
   .bidi = 2,
   .disable_alternate_screen = false,
+  .suppress_sgr = "",
+  .suppress_dec = "",
+  .suppress_win = "",
+  .suppress_osc = "",
+  .suppress_nrc = "",  // unused
+  .suppress_wheel = "",
+  .filter_paste = "",
+  .input_clears_selection = true,
+  .trim_selection = true,
   .charwidth = 0,
   .emojis = 0,
   .emoji_placement = 0,
@@ -159,6 +174,7 @@ const config default_cfg = {
   .drop_commands = W(""),
   .user_commands = W(""),
   .session_commands = W(""),
+  .task_commands = W(""),
   .menu_mouse = "b",
   .menu_ctrlmouse = "e|ls",
   .menu_altmouse = "ls",
@@ -168,6 +184,7 @@ const config default_cfg = {
   .col_spacing = 0,
   .row_spacing = 0,
   .padding = 1,
+  .ligatures_support = 0,
   .handle_dpichanged = true,
   .check_version_update = 900,
   .word_chars = "",
@@ -175,6 +192,7 @@ const config default_cfg = {
   .use_system_colours = false,
   .short_long_opts = false,
   .bold_as_special = false,
+  .selection_show_size = false,
   .old_bold = false,
   .ime_cursor_colour = DEFAULT_COLOUR,
   .ansi_colours = {
@@ -228,6 +246,7 @@ options[] = {
   {"BoldColour", OPT_COLOUR, offcfg(bold_colour)},
   {"CursorColour", OPT_COLOUR, offcfg(cursor_colour)},
   {"UnderlineColour", OPT_COLOUR, offcfg(underl_colour)},
+  {"HoverColour", OPT_COLOUR, offcfg(hover_colour)},
   {"UnderlineManual", OPT_BOOL, offcfg(underl_manual)},
   {"HighlightBackgroundColour", OPT_COLOUR, offcfg(sel_bg_colour)},
   {"HighlightForegroundColour", OPT_COLOUR, offcfg(sel_fg_colour)},
@@ -235,6 +254,7 @@ options[] = {
   {"SearchBackgroundColour", OPT_COLOUR, offcfg(search_bg_colour)},
   {"SearchCurrentColour", OPT_COLOUR, offcfg(search_current_colour)},
   {"ThemeFile", OPT_WSTRING, offcfg(theme_file)},
+  {"Background", OPT_WSTRING, offcfg(background)},
   {"ColourScheme", OPT_STRING, offcfg(colour_scheme)},
   {"Transparency", OPT_TRANS, offcfg(transparency)},
 #ifdef support_blurred
@@ -286,6 +306,7 @@ options[] = {
   {"BackspaceSendsBS", OPT_BOOL, offcfg(backspace_sends_bs)},
   {"DeleteSendsDEL", OPT_BOOL, offcfg(delete_sends_del)},
   {"CtrlAltIsAltGr", OPT_BOOL, offcfg(ctrl_alt_is_altgr)},
+  {"CtrlAltDelayAltGr", OPT_INT, offcfg(ctrl_alt_delay_altgr)},
   {"OldAltGrDetection", OPT_BOOL, offcfg(old_altgr_detection)},
   {"ClipShortcuts", OPT_BOOL, offcfg(clip_shortcuts)},
   {"WindowShortcuts", OPT_BOOL, offcfg(window_shortcuts)},
@@ -295,9 +316,7 @@ options[] = {
   {"AltFnShortcuts", OPT_BOOL, offcfg(alt_fn_shortcuts)},
   {"CtrlShiftShortcuts", OPT_BOOL, offcfg(ctrl_shift_shortcuts)},
   {"CtrlExchangeShift", OPT_BOOL, offcfg(ctrl_exchange_shift)},
-#ifdef support_disable_ctrl_controls_663
-  {"CtrlControls", OPT_BOOL | OPT_LEGACY, offcfg(ctrl_controls)},
-#endif
+  {"CtrlControls", OPT_BOOL, offcfg(ctrl_controls)},
   {"ComposeKey", OPT_MOD, offcfg(compose_key)},
   {"Key_PrintScreen", OPT_STRING, offcfg(key_prtscreen)},
   {"Key_Pause", OPT_STRING, offcfg(key_pause)},
@@ -306,6 +325,7 @@ options[] = {
   {"Key_ScrollLock", OPT_STRING, offcfg(key_scrlock)},
   {"Break", OPT_STRING | OPT_LEGACY, offcfg(key_break)},
   {"Pause", OPT_STRING | OPT_LEGACY, offcfg(key_pause)},
+  {"KeyFunctions", OPT_WSTRING | OPT_KEEPCR, offcfg(key_commands)},
 
   // Mouse
   {"CopyOnSelect", OPT_BOOL, offcfg(copy_on_select)},
@@ -318,6 +338,7 @@ options[] = {
   {"ClicksTargetApp", OPT_BOOL, offcfg(clicks_target_app)},
   {"ClickTargetMod", OPT_MOD, offcfg(click_target_mod)},
   {"HideMouse", OPT_BOOL, offcfg(hide_mouse)},
+  {"ElasticMouse", OPT_BOOL, offcfg(elastic_mouse)},
 
   // Window
   {"Columns", OPT_INT, offcfg(cols)},
@@ -333,6 +354,7 @@ options[] = {
   {"Term", OPT_STRING, offcfg(term)},
   {"Answerback", OPT_WSTRING, offcfg(answerback)},
   {"OldWrapModes", OPT_BOOL, offcfg(old_wrapmodes)},
+  {"Enable132ColumnSwitching", OPT_BOOL, offcfg(enable_deccolm_init)},
   {"BellSound", OPT_BOOL, offcfg(bell_sound)},
   {"BellType", OPT_INT, offcfg(bell_type)},
   {"BellFile", OPT_WSTRING, offcfg(bell_file)},
@@ -365,6 +387,15 @@ options[] = {
   // "Hidden"
   {"Bidi", OPT_INT, offcfg(bidi)},
   {"NoAltScreen", OPT_BOOL, offcfg(disable_alternate_screen)},
+  {"SuppressSGR", OPT_STRING, offcfg(suppress_sgr)},
+  {"SuppressDEC", OPT_STRING, offcfg(suppress_dec)},
+  {"SuppressWIN", OPT_STRING, offcfg(suppress_win)},
+  {"SuppressOSC", OPT_STRING, offcfg(suppress_osc)},
+  {"SuppressNRC", OPT_STRING, offcfg(suppress_nrc)},  // unused
+  {"SuppressMouseWheel", OPT_STRING, offcfg(suppress_wheel)},
+  {"FilterPasteControls", OPT_STRING, offcfg(filter_paste)},
+  {"ClearSelectionOnInput", OPT_BOOL, offcfg(input_clears_selection)},
+  {"TrimSelection", OPT_BOOL, offcfg(trim_selection)},
   {"Charwidth", OPT_CHARWIDTH, offcfg(charwidth)},
   {"Emojis", OPT_EMOJIS, offcfg(emojis)},
   {"EmojiPlacement", OPT_EMOJI_PLACEMENT, offcfg(emoji_placement)},
@@ -374,6 +405,7 @@ options[] = {
   {"DropCommands", OPT_WSTRING | OPT_KEEPCR, offcfg(drop_commands)},
   {"UserCommands", OPT_WSTRING | OPT_KEEPCR, offcfg(user_commands)},
   {"SessionCommands", OPT_WSTRING | OPT_KEEPCR, offcfg(session_commands)},
+  {"TaskCommands", OPT_WSTRING | OPT_KEEPCR, offcfg(task_commands)},
   {"MenuMouse", OPT_STRING, offcfg(menu_mouse)},
   {"MenuCtrlMouse", OPT_STRING, offcfg(menu_ctrlmouse)},
   {"MenuMouse5", OPT_STRING, offcfg(menu_altmouse)},
@@ -383,6 +415,7 @@ options[] = {
   {"ColSpacing", OPT_INT, offcfg(col_spacing)},
   {"RowSpacing", OPT_INT, offcfg(row_spacing)},
   {"Padding", OPT_INT, offcfg(padding)},
+  {"LigaturesSupport", OPT_INT, offcfg(ligatures_support)},
   {"HandleDPI", OPT_BOOL, offcfg(handle_dpichanged)},
   {"CheckVersionUpdate", OPT_INT, offcfg(check_version_update)},
   {"WordChars", OPT_STRING, offcfg(word_chars)},
@@ -392,6 +425,7 @@ options[] = {
   {"OldBold", OPT_BOOL, offcfg(old_bold)},
   {"ShortLongOpts", OPT_BOOL, offcfg(short_long_opts)},
   {"BoldAsRainbowSparkles", OPT_BOOL, offcfg(bold_as_special)},
+  {"SelectionShowSize", OPT_INT, offcfg(selection_show_size)},
 
   // ANSI colours
   {"Black", OPT_COLOUR, offcfg(ansi_colours[BLACK_I])},
@@ -454,6 +488,7 @@ static opt_val
     {"stretch", EMPL_STRETCH},
     {"align", EMPL_ALIGN},
     {"middle", EMPL_MIDDLE},
+    {"full", EMPL_FULL},
     {0, 0}
   },
   [OPT_MOD] = (opt_val[]) {
@@ -676,18 +711,32 @@ bool
 parse_colour(string s, colour *cp)
 {
   uint r, g, b;
-  if (sscanf(s, "%u,%u,%u%c", &r, &g, &b, &(char){0}) == 3)
+  float c, m, y, k = 0;
+  if (sscanf(s, "%u,%u,%u", &r, &g, &b) == 3)
     ;
-  else if (sscanf(s, "#%2x%2x%2x%c", &r, &g, &b, &(char){0}) == 3)
+  else if (sscanf(s, "#%2x%2x%2x", &r, &g, &b) == 3)
     ;
-  else if (sscanf(s, "rgb:%2x/%2x/%2x%c", &r, &g, &b, &(char){0}) == 3)
+  else if (sscanf(s, "rgb:%2x/%2x/%2x", &r, &g, &b) == 3)
     ;
-  else if (sscanf(s, "rgb:%4x/%4x/%4x%c", &r, &g, &b, &(char){0}) == 3)
-    r >>=8, g >>= 8, b >>= 8;
+  else if (sscanf(s, "rgb:%4x/%4x/%4x", &r, &g, &b) == 3)
+    r >>= 8, g >>= 8, b >>= 8;
+  else if (sscanf(s, "cmy:%f/%f/%f", &c, &m, &y) == 3
+        || sscanf(s, "cmyk:%f/%f/%f/%f", &c, &m, &y, &k) == 4
+          )
+    if (c >= 0 && c <= 1 && m >= 0 && m <= 1 && y >= 0 && y <= 1 && k >= 0 && k <= 1) {
+      r = (1 - c) * (1 - k) * 255;
+      g = (1 - m) * (1 - k) * 255;
+      b = (1 - y) * (1 - k) * 255;
+    }
+    else
+      return false;
   else {
     int coli = -1;
+    int len = strlen(s);
+    while (len && s[len - 1] == ' ')
+      len--;
     for (uint i = 0; i < lengthof(xcolours); i++)
-      if (!strcasecmp(s, xcolours[i].name)) {
+      if (0 == strncasecmp(s, xcolours[i].name, len)) {
         r = xcolours[i].r;
         g = xcolours[i].g;
         b = xcolours[i].b;
@@ -1272,28 +1321,36 @@ load_config(string filename, int to_save)
   if (file) {
     while (fgets(linebuf, sizeof linebuf, file)) {
       char * lbuf = linebuf;
-      while (!strchr(lbuf, '\n')) {
+      int len;
+      while (len = strlen(lbuf),
+             (len && lbuf[len - 1] != '\n') ||
+             (len > 1 && lbuf[len - 1] == '\n' && lbuf[len - 2] == '\\')
+            )
+      {
         if (lbuf == linebuf) {
           // make lbuf dynamic
           lbuf = strdup(lbuf);
         }
         // append to lbuf
-        int len = strlen(lbuf);
+        len = strlen(lbuf);
         lbuf = renewn(lbuf, len + sizeof linebuf);
         if (!fgets(&lbuf[len], sizeof linebuf, file))
           break;
       }
 
-      //lbuf[strcspn(lbuf, "\r\n")] = 0;  /* trim newline */
-      // trim newline but allow embedded CR (esp. for DropCommands)
-      lbuf[strcspn(lbuf, "\n")] = 0;
-      // preserve comment lines and empty lines
+      if (lbuf[len - 1] == '\n')
+        lbuf[len - 1] = 0;
+      //printf("option <%s>\n", lbuf);
+
       if (lbuf[0] == '#' || lbuf[0] == '\0') {
+        // preserve comment lines and empty lines
         if (to_save)
           remember_file_comment(lbuf);
       }
       else {
+        // apply config options
         int i = parse_option(lbuf, true);
+        // remember config options for saving
         if (to_save) {
           if (i >= 0)
             remember_file_option("load", i);
@@ -1313,6 +1370,7 @@ load_config(string filename, int to_save)
   if (to_save) {
     copy_config("after load", &file_cfg, &cfg);
   }
+  //printf("load_config %s %d bd %d\n", filename, to_save, cfg.bold_as_font);
 }
 
 void
@@ -1376,13 +1434,22 @@ finish_config(void)
     strset(&cfg.charset, "");
 
   // bold_as_font used to be implied by !bold_as_colour.
+  //printf("finish_config bd %d\n", cfg.bold_as_font);
+#ifdef previous_patch_for_242
+  // This tweak was added in commit/964b3097e4624d4b5a3231389d34c00eb5cd1d6d
+  // to support bold display as both font and colour (#242)
+  // but it does not seem necessary anymore with the current code and options
+  // handling, and it confuses option initialization (mintty/wsltty#103),
+  // so it's removed.
   if (cfg.bold_as_font == -1) {
     cfg.bold_as_font = !cfg.bold_as_colour;
     remember_file_option("finish", find_option(true, "BoldAsFont"));
   }
+#endif
 
   if (0 < cfg.transparency && cfg.transparency <= 3)
     cfg.transparency *= 16;
+  //printf("finish_config bd %d\n", cfg.bold_as_font);
 }
 
 static void
@@ -1510,6 +1577,7 @@ apply_config(bool save)
   }
   else if (had_theme)
     win_reset_colours();
+  //printf("apply_config %d bd %d\n", save, cfg.bold_as_font);
 }
 
 
@@ -1598,6 +1666,7 @@ getregstr(HKEY key, wstring subkey, wstring attribute)
     return 0;
   wchar * val = malloc (len);
   res = RegQueryValueExW(sk, attribute, 0, &type, (void *)val, &len);
+  RegCloseKey(sk);
   if (res) {
     free(val);
     return 0;

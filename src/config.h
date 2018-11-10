@@ -16,7 +16,7 @@ enum { FLASH_FRAME = 1, FLASH_BORDER = 2, FLASH_FULL = 4, FLASH_REVERSE = 8 };
 enum { EMOJIS_NONE = 0, EMOJIS_ONE = 1, EMOJIS_NOTO = 2, EMOJIS_APPLE = 3, 
        EMOJIS_GOOGLE = 4, EMOJIS_TWITTER = 5, EMOJIS_FB = 6, 
        EMOJIS_SAMSUNG = 7, EMOJIS_WINDOWS = 8 };
-enum { EMPL_STRETCH = 0, EMPL_ALIGN = 1, EMPL_MIDDLE = 2 };
+enum { EMPL_STRETCH = 0, EMPL_ALIGN = 1, EMPL_MIDDLE = 2, EMPL_FULL = 3 };
 
 // Colour values.
 
@@ -48,11 +48,13 @@ typedef struct {
 
 typedef struct {
   // Looks
-  colour fg_colour, bold_colour, bg_colour, cursor_colour, underl_colour;
+  colour fg_colour, bold_colour, bg_colour, cursor_colour;
+  colour underl_colour, hover_colour;
   bool underl_manual;
   colour sel_fg_colour, sel_bg_colour;
   colour search_fg_colour, search_bg_colour, search_current_colour;
   wstring theme_file;
+  wstring background;
   string colour_scheme;
   char transparency;
   bool blurred;
@@ -66,7 +68,7 @@ typedef struct {
   bool show_hidden_fonts;
   char font_smoothing;
   char font_render;
-  char bold_as_font;    // 0 = false, 1 = true, -1 = undefined
+  bool bold_as_font;
   bool bold_as_colour;
   bool allow_blinking;
   string locale;
@@ -76,6 +78,7 @@ typedef struct {
   bool backspace_sends_bs;
   bool delete_sends_del;
   bool ctrl_alt_is_altgr;
+  int ctrl_alt_delay_altgr;
   bool old_altgr_detection;
   bool clip_shortcuts;
   bool window_shortcuts;
@@ -92,6 +95,7 @@ typedef struct {
   string key_break;	// VK_CANCEL
   string key_menu;	// VK_APPS
   string key_scrlock;	// VK_SCROLL
+  wstring key_commands;
   // Mouse
   bool copy_on_select;
   bool copy_as_rtf;
@@ -103,6 +107,7 @@ typedef struct {
   bool clicks_target_app;
   char click_target_mod;
   bool hide_mouse;
+  bool elastic_mouse;
   // Window
   int cols, rows;
   int scrollback_lines;
@@ -115,6 +120,7 @@ typedef struct {
   string term;
   wstring answerback;
   bool old_wrapmodes;
+  bool enable_deccolm_init;
   bool bell_sound;
   int bell_type;
   wstring bell_file;
@@ -144,6 +150,15 @@ typedef struct {
   // "Hidden"
   int bidi;
   bool disable_alternate_screen;
+  string suppress_sgr;
+  string suppress_dec;
+  string suppress_win;
+  string suppress_osc;
+  string suppress_nrc;
+  string suppress_wheel;
+  string filter_paste;
+  bool input_clears_selection;
+  bool trim_selection;
   char charwidth;
   char emojis;
   char emoji_placement;
@@ -153,6 +168,7 @@ typedef struct {
   wstring drop_commands;
   wstring user_commands;
   wstring session_commands;
+  wstring task_commands;
   string menu_mouse;
   string menu_ctrlmouse;
   string menu_altmouse;
@@ -161,7 +177,8 @@ typedef struct {
   int geom_sync;
   int col_spacing, row_spacing;
   int padding;
-  bool handle_dpichanged;
+  int ligatures_support;
+  int handle_dpichanged;
   int check_version_update;
   string word_chars;
   string word_chars_excl;
@@ -170,6 +187,7 @@ typedef struct {
   wstring sixel_clip_char;
   bool short_long_opts;
   bool bold_as_special;
+  int selection_show_size;
   // Legacy
   bool use_system_colours;
   bool old_bold;

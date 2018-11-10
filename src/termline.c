@@ -1,5 +1,5 @@
 // termline.c (part of mintty)
-// Copyright 2008-12 Andy Koppe
+// Copyright 2008-12 Andy Koppe, -2018 Thomas Wolff
 // Adapted from code from PuTTY-0.60 by Simon Tatham and team.
 // Licensed under the terms of the GNU General Public License v3 or later.
 
@@ -89,8 +89,8 @@ add_cc(termline *line, int col, wchar chr, cattr attr)
     col += line->chars[col].cc_next;
 
  /*
-  * `col' now points at the last cc currently in this cell; so
-  * we simply add another one.
+  * `col' now points at the last cc currently in this cell; 
+  * so we simply add another one.
   */
   int newcc = line->cc_free;
   if (line->chars[newcc].cc_next)
@@ -129,9 +129,8 @@ clear_cc(termline *line, int col)
 }
 
 /*
- * Compare two character cells for equality. Special case required
- * in do_paint() where we override what we expect the chr and attr
- * fields to be.
+ * Compare two character cells for equality. Special case required in
+ * do_paint() where we override what we expect the chr and attr fields to be.
  */
 int
 termchars_equal_override(termchar *a, termchar *b, uint bchr, cattr battr)
@@ -144,6 +143,8 @@ termchars_equal_override(termchar *a, termchar *b, uint bchr, cattr battr)
   if (a->attr.truefg != battr.truefg)
     return false;
   if (a->attr.truebg != battr.truebg)
+    return false;
+  if (a->attr.ulcolr != battr.ulcolr)
     return false;
   while (a->cc_next || b->cc_next) {
     if (!a->cc_next || !b->cc_next)
@@ -163,8 +164,8 @@ termchars_equal(termchar *a, termchar *b)
 }
 
 /*
- * Copy a character cell. (Requires a pointer to the destination
- * termline, so as to access its free list.)
+ * Copy a character cell. (Requires a pointer to the destination termline,
+ * so as to access its free list.)
  */
 void
 copy_termchar(termline *destline, int x, termchar *src)
@@ -245,8 +246,9 @@ makeliteral_attr(struct buf *b, termchar *c)
   cattrflags attr = c->attr.attr & ~DATTR_MASK;
   uint truefg = c->attr.truefg;
   uint truebg = c->attr.truebg;
+  colour ulcolr = c->attr.ulcolr;
 
-  if (attr < 0x800000 && !truefg && !truebg) {
+  if (attr < 0x800000 && !truefg && !truebg && ulcolr != (colour)-1) {
     add(b, (uchar) ((attr >> 16) & 0xFF));
     add(b, (uchar) ((attr >> 8) & 0xFF));
     add(b, (uchar) (attr & 0xFF));
@@ -267,6 +269,9 @@ makeliteral_attr(struct buf *b, termchar *c)
     add(b, (uchar) ((truebg >> 16) & 0xFF));
     add(b, (uchar) ((truebg >> 8) & 0xFF));
     add(b, (uchar) (truebg & 0xFF));
+    add(b, (uchar) ((ulcolr >> 16) & 0xFF));
+    add(b, (uchar) ((ulcolr >> 8) & 0xFF));
+    add(b, (uchar) (ulcolr & 0xFF));
   }
 }
 
@@ -276,8 +281,7 @@ makeliteral_cc(struct buf *b, termchar *c)
  /*
   * For combining characters, I just encode a bunch of ordinary
   * chars using makeliteral_chr, and terminate with a \0
-  * character (which I know won't come up as a combining char
-  * itself).
+  * character (which I know won't come up as a combining char itself).
   */
   termchar z;
 
@@ -317,6 +321,7 @@ readliteral_attr(struct buf *b, termchar *c, termline *unused(line))
   cattrflags attr;
   uint fg = 0;
   uint bg = 0;
+  colour ul = (colour)-1;
 
   attr = get(b) << 16;
   attr |= get(b) << 8;
@@ -340,11 +345,15 @@ readliteral_attr(struct buf *b, termchar *c, termline *unused(line))
     bg = get(b) << 16;
     bg |= get(b) << 8;
     bg |= get(b);
+    ul = get(b) << 16;
+    ul |= get(b) << 8;
+    ul |= get(b);
   }
 
   c->attr.attr = attr;
   c->attr.truefg = fg;
   c->attr.truebg = bg;
+  c->attr.ulcolr = ul;
 }
 
 static void
@@ -389,12 +398,11 @@ makerle(struct buf *b, termline *line,
       * This literal precisely matches the previous one.
       * Turn it into a run if it's worthwhile.
       *
-      * With one-byte literals, it costs us two bytes to
-      * encode a run, plus another byte to write the header
-      * to resume normal output; so a three-element run is
-      * neutral, and anything beyond that is unconditionally
-      * worthwhile. With two-byte literals or more, even a
-      * 2-run is a win.
+      * With one-byte literals, it costs us two bytes to encode a run, 
+      * plus another byte to write the header to resume normal output; 
+      * so a three-element run is neutral, and anything beyond that 
+      * is unconditionally worthwhile. 
+      * With two-byte literals or more, even a 2-run is a win.
       */
       if (thislen > 1 || prev2) {
         int runpos, runlen;
@@ -422,8 +430,7 @@ makerle(struct buf *b, termline *line,
           runpos = prevpos;
           b->len = prevpos + prevlen + 1;
          /*
-          * Terminate the previous run of ordinary
-          * literals.
+          * Terminate the previous run of ordinary literals.
           */
           assert(hdrsize >= 1 && hdrsize <= 128);
           b->data[hdrpos] = hdrsize - 1;
@@ -458,9 +465,8 @@ makerle(struct buf *b, termline *line,
       }
       else {
        /*
-        * Just flag that the previous two literals were
-        * identical, in case we find a third identical one
-        * we want to turn into a run.
+        * Just flag that the previous two literals were identical,
+        * in case we find a third identical one we want to turn into a run.
         */
         prev2 = true;
         prevlen = thislen;
@@ -474,8 +480,7 @@ makerle(struct buf *b, termline *line,
     }
 
    /*
-    * This character isn't (yet) part of a run. Add it to
-    * hdrsize.
+    * This character isn't (yet) part of a run. Add it to hdrsize.
     */
     hdrsize++;
     if (hdrsize == 128) {
@@ -505,9 +510,8 @@ compressline(termline *line)
   struct buf buffer = { null, 0, 0 }, *b = &buffer;
 
  /*
-  * First, store the column count, 7 bits at a time, least
-  * significant `digit' first, with the high bit set on all but
-  * the last.
+  * First, store the column count, 7 bits at a time, least significant
+  * `digit' first, with the high bit set on all but the last.
   */
   {
     int n = line->cols;
@@ -523,6 +527,18 @@ compressline(termline *line)
   */
   {
     int n = line->lattr;
+    while (n >= 128) {
+      add(b, (uchar) ((n & 0x7F) | 0x80));
+      n >>= 7;
+    }
+    add(b, (uchar) (n));
+  }
+
+ /*
+  * Store the wrap position if used.
+  */
+  if (line->lattr & LATTR_WRAPPED) {
+    int n = line->wrappos;
     while (n >= 128) {
       add(b, (uchar) ((n & 0x7F) | 0x80));
       n >>= 7;
@@ -621,10 +637,9 @@ decompressline(uchar *data, int *bytes_used)
   line->cc_free = 0;
 
  /*
-  * We must set all the cc pointers in line->chars to 0 right
-  * now, so that cc diagnostics that verify the integrity of the
-  * whole line will make sense while we're in the middle of
-  * building it up.
+  * We must set all the cc pointers in line->chars to 0 right now, 
+  * so that cc diagnostics that verify the integrity of the whole line 
+  * will make sense while we're in the middle of building it up.
   */
   {
     int i;
@@ -641,6 +656,19 @@ decompressline(uchar *data, int *bytes_used)
     line->lattr |= (byte & 0x7F) << shift;
     shift += 7;
   } while (byte & 0x80);
+
+ /*
+  * Read the wrap position if used.
+  */
+  if (line->lattr & LATTR_WRAPPED) {
+    ncols = shift = 0;
+    do {
+      byte = get(b);
+      ncols |= (byte & 0x7F) << shift;
+      shift += 7;
+    } while (byte & 0x80);
+    line->wrappos = ncols;
+  }
 
  /*
   * Now we read in each of the RLE streams in turn.
@@ -728,8 +756,7 @@ sblines(void)
 
 /*
  * Retrieve a line of the screen or of the scrollback, according to
- * whether the y coordinate is non-negative or negative
- * (respectively).
+ * whether the y coordinate is non-negative or negative (respectively).
  */
 termline *
 fetch_line(int y)

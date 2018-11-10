@@ -132,7 +132,7 @@ sel_spread_half(pos p, bool forward)
           p.y--;
         }
       }
-    default:
+    otherwise:
      /* Shouldn't happen. */
       break;
   }
@@ -147,9 +147,20 @@ sel_spread(void)
   incpos(term.sel_end);
 }
 
+static bool
+hover_spread(void)
+{
+  term.hover_start = sel_spread_word(term.hover_start, false);
+  term.hover_end = sel_spread_word(term.hover_end, true);
+  bool eq = term.hover_start.y == term.hover_end.y && term.hover_start.x == term.hover_end.x;
+  incpos(term.hover_end);
+  return eq;
+}
+
 static void
 sel_drag(pos selpoint)
 {
+  //printf("sel_drag %d+%d/2 (anchor %d+%d/2)\n", selpoint.x, selpoint.r, term.sel_anchor.x, term.sel_anchor.r);
   term.selected = true;
   if (!term.sel_rect) {
    /*
@@ -159,10 +170,26 @@ sel_drag(pos selpoint)
     if (poslt(selpoint, term.sel_anchor)) {
       term.sel_start = selpoint;
       term.sel_end = term.sel_anchor;
+      if (cfg.elastic_mouse && !term.mouse_mode) {
+        if (selpoint.r) {
+          incpos(term.sel_start);
+        }
+        if (!term.sel_anchor.r) {
+          decpos(term.sel_end);
+        }
+      }
     }
     else {
       term.sel_start = term.sel_anchor;
       term.sel_end = selpoint;
+      if (cfg.elastic_mouse && !term.mouse_mode) {
+        if (term.sel_anchor.r) {
+          incpos(term.sel_start);
+        }
+        if (!selpoint.r) {
+          decpos(term.sel_end);
+        }
+      }
     }
     sel_spread();
   }
@@ -182,6 +209,7 @@ sel_drag(pos selpoint)
 static void
 sel_extend(pos selpoint)
 {
+  //printf("sel_extend %d+%d/2 (anchor %d+%d/2)\n", selpoint.x, selpoint.r, term.sel_anchor.x, term.sel_anchor.r);
   if (term.selected) {
     if (!term.sel_rect) {
      /*
@@ -333,7 +361,7 @@ box_pos(pos p)
 static pos
 get_selpoint(const pos p)
 {
-  pos sp = { .y = p.y + term.disptop, .x = p.x };
+  pos sp = { .y = p.y + term.disptop, .x = p.x, .r = p.r };
   termline *line = fetch_line(sp.y);
   if ((line->lattr & LATTR_MODE) != LATTR_NORM)
     sp.x /= 2;
@@ -380,6 +408,11 @@ is_app_mouse(mod_keys *mods_p)
 void
 term_mouse_click(mouse_button b, mod_keys mods, pos p, int count)
 {
+  if (term.hovering) {
+    term.hovering = false;
+    win_update(true);
+  }
+
   if (is_app_mouse(&mods)) {
     if (term.mouse_mode == MM_X10)
       mods = 0;
@@ -435,7 +468,7 @@ term_mouse_click(mouse_button b, mod_keys mods, pos p, int count)
         term.sel_rect = false;
         term.sel_start = term.sel_end = term.sel_anchor = p;
         sel_spread();
-        win_update();
+        win_update(true);
       }
     }
     else if (b == MBT_MIDDLE && mca == MC_VOID) {
@@ -459,7 +492,7 @@ term_mouse_click(mouse_button b, mod_keys mods, pos p, int count)
         sel_spread();
       }
       win_capture_mouse();
-      win_update();
+      win_update(true);
     }
   }
 }
@@ -475,7 +508,8 @@ term_mouse_release(mouse_button b, mod_keys mods, pos p)
     when MS_OPENING:
       term_open();
       term.selected = false;
-      win_update();
+      term.hovering = false;
+      win_update(true);
     when MS_SEL_CHAR or MS_SEL_WORD or MS_SEL_LINE: {
       // Finish selection.
       if (term.selected && cfg.copy_on_select)
@@ -537,7 +571,7 @@ term_mouse_release(mouse_button b, mod_keys mods, pos p)
       moved_previously = true;
       last_dest = dest;
     }
-    default:
+    otherwise:
       if (is_app_mouse(&mods)) {
         if (term.mouse_mode >= MM_VT200)
           send_mouse_event(MA_RELEASE, b, mods, box_pos(p));
@@ -551,7 +585,7 @@ sel_scroll_cb(void)
   if (term_selecting() && term.sel_scroll) {
     term_scroll(0, term.sel_scroll);
     sel_drag(get_selpoint(term.sel_pos));
-    win_update();
+    win_update(true);
     win_set_timer(sel_scroll_cb, 125);
   }
 }
@@ -559,7 +593,9 @@ sel_scroll_cb(void)
 void
 term_mouse_move(mod_keys mods, pos p)
 {
+  //printf("mouse_move %d+%d/2\n", p.x, p.r);
   pos bp = box_pos(p);
+
   if (term_selecting()) {
     if (p.y < 0 || p.y >= term.rows) {
       if (!term.sel_scroll)
@@ -570,15 +606,19 @@ term_mouse_move(mod_keys mods, pos p)
     else {
       term.sel_scroll = 0;
       if (p.x < 0 && p.y + term.disptop > term.sel_anchor.y)
-        bp = (pos){.y = p.y - 1, .x = term.cols - 1};
+        bp = (pos){.y = p.y - 1, .x = term.cols - 1, .r = p.r};
     }
+
+    bool alt = mods & MDK_ALT;
+    term.sel_rect = alt;
     sel_drag(get_selpoint(bp));
-    win_update();
+
+    win_update(true);
   }
   else if (term.mouse_state == MS_OPENING) {
     term.mouse_state = 0;
     term.selected = false;
-    win_update();
+    win_update(true);
   }
   else if (term.mouse_state > 0) {
     if (term.mouse_mode >= MM_BTN_EVENT)
@@ -588,17 +628,37 @@ term_mouse_move(mod_keys mods, pos p)
     if (term.mouse_mode == MM_ANY_EVENT)
       send_mouse_event(MA_MOVE, 0, mods, bp);
   }
+
+  if (mods == MDK_CTRL) {
+    p = get_selpoint(box_pos(p));
+    term.hover_start = term.hover_end = p;
+    if (!hover_spread()) {
+      term.hovering = true;
+      win_update(true);
+    }
+    else if (term.hovering) {
+      term.hovering = false;
+      win_update(true);
+    }
+  }
 }
 
 void
 term_mouse_wheel(int delta, int lines_per_notch, mod_keys mods, pos p)
 {
+  if (term.hovering) {
+    term.hovering = false;
+    win_update(true);
+  }
+
   enum { NOTCH_DELTA = 120 };
 
   static int accu;
   accu += delta;
 
   if (is_app_mouse(&mods)) {
+    if (strstr(cfg.suppress_wheel, "report"))
+      return;
     // Send as mouse events, with one event per notch.
     int notches = accu / NOTCH_DELTA;
     if (notches) {
@@ -609,6 +669,8 @@ term_mouse_wheel(int delta, int lines_per_notch, mod_keys mods, pos p)
     }
   }
   else if ((mods & ~MDK_SHIFT) == MDK_CTRL) {
+    if (strstr(cfg.suppress_wheel, "zoom"))
+      return;
     if (cfg.zoom_mouse) {
       int zoom = accu / NOTCH_DELTA;
       if (zoom) {
@@ -626,9 +688,14 @@ term_mouse_wheel(int delta, int lines_per_notch, mod_keys mods, pos p)
     int lines = lines_per_notch * accu / NOTCH_DELTA;
     if (lines) {
       accu -= lines * NOTCH_DELTA / lines_per_notch;
-      if (!term.on_alt_screen || term.show_other_screen)
+      if (!term.on_alt_screen || term.show_other_screen) {
+        if (strstr(cfg.suppress_wheel, "scrollwin"))
+          return;
         term_scroll(0, -lines);
+      }
       else if (term.wheel_reporting) {
+        if (strstr(cfg.suppress_wheel, "scrollapp"))
+          return;
         // Send scroll distance as CSI a/b events
         bool up = lines > 0;
         lines = abs(lines);

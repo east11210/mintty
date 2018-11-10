@@ -117,11 +117,14 @@ enum {
   ATTR_STRIKEOUT  = 0x04000000u,
   ATTR_DOUBLYUND  = 0x08000000u,
   ATTR_OVERL      = 0x10000000u,
+  ATTR_BROKENUND  = 0x0000000800000000u,
+  ATTR_ULCOLOUR   = 0x0020000000000000u,
 
   ATTR_PROTECTED  = 0x20000000u,
   ATTR_WIDE       = 0x40000000u,
   ATTR_NARROW     = 0x80000000u,
   ATTR_EXPAND     = 0x0000000100000000u,
+  ATTR_FRAMED     = 0x0010000000000000u,
 
   TATTR_EMOJI     = 0x1000000000000000u,
 
@@ -130,6 +133,9 @@ enum {
 
   FONTFAM_MASK    = 0x000F000000000000u,
   ATTR_FONTFAM_SHIFT = 48,
+
+  ATTR_CURLYUND   = ATTR_UNDER | ATTR_DOUBLYUND,
+  UNDER_MASK      = ATTR_UNDER | ATTR_DOUBLYUND | ATTR_BROKENUND,
 
   TATTR_COMBINING = 0x0000000200000000u, /* combining characters */
   TATTR_COMBDOUBL = 0x0000000400000000u, /* combining double characters */
@@ -144,17 +150,15 @@ enum {
   TATTR_MARKED    = 0x0400000000000000u, /* scroll marker */
   TATTR_CURMARKED = 0x0800000000000000u, /* current scroll marker */
 
+  TATTR_SELECTED  = 0x2000000000000000u, /* highlighted */
+  TATTR_CLEAR     = 0x4000000000000000u, /* erased / unwritten */
+
   DATTR_STARTRUN  = 0x8000000000000000u, /* start of redraw run */
   DATTR_MASK      = TATTR_RIGHTCURS | TATTR_PASCURS | TATTR_ACTCURS
                     | DATTR_STARTRUN
   // unassigned bits:
-  //                0x0000000800000000u
-  //                0x0010000000000000u
-  //                0x0020000000000000u
   //                0x0040000000000000u
   //                0x0080000000000000u
-  //                0x2000000000000000u
-  //                0x4000000000000000u
 };
 
 /* Line attributes.
@@ -190,6 +194,7 @@ typedef struct {
   cattrflags attr;
   uint truefg;
   uint truebg;
+  colour ulcolr;
 } cattr;
 
 extern const cattr CATTR_DEFAULT;
@@ -221,6 +226,7 @@ typedef struct {
 
 typedef struct {
   ushort lattr;
+  ushort wrappos;
   ushort cols;    /* number of real columns on the line */
   ushort size;    /* number of allocated termchars
                      (cc-lists may make this > cols) */
@@ -229,15 +235,9 @@ typedef struct {
   termchar *chars;
 } termline;
 
-typedef termline *termlines;
+typedef termline * termlines;
 
-typedef struct {
-  int width;
-  termchar *chars;
-  int *forward, *backward;      /* the permutations of line positions */
-} bidi_cache_entry;
-
-extern termline *newline(int cols, int bce);
+extern termline * newline(int cols, int bce);
 extern void freeline(termline *);
 extern void clearline(termline *);
 extern void resizeline(termline *, int);
@@ -246,20 +246,11 @@ extern int sblines(void);
 extern termline *fetch_line(int y);
 extern void release_line(termline *);
 
-extern int termchars_equal(termchar *a, termchar *b);
-extern int termchars_equal_override(termchar *a, termchar *b, uint bchr, cattr battr);
-extern int termattrs_equal_fg(cattr * a, cattr * b);
-
-extern void copy_termchar(termline *destline, int x, termchar *src);
-extern void move_termchar(termline *line, termchar *dest, termchar *src);
-
-extern void add_cc(termline *, int col, wchar chr, cattr attr);
-extern void clear_cc(termline *, int col);
-
-extern uchar *compressline(termline *);
-extern termline *decompressline(uchar *, int *bytes_used);
-
-extern termchar *term_bidi_line(termline *, int scr_y);
+typedef struct {
+  int width;
+  termchar *chars;
+  int *forward, *backward;      /* the permutations of line positions */
+} bidi_cache_entry;
 
 /* Traditional terminal character sets */
 typedef enum {
@@ -283,28 +274,28 @@ typedef enum {
   CSET_ES = 'Z', // Z           Spanish
   CSET_SE = '7', // H or 7      Swedish
   CSET_CH = '=', // =           Swiss
+  // 96-character sets (xterm 336)
+  CSET_ISO_Latin_Cyrillic	= 'L',
+  CSET_ISO_Greek_Supp		= 'F',
+  CSET_ISO_Hebrew		= 'H',
+  CSET_ISO_Latin_5		= 'M',
+  CSET_DEC_Greek_Supp		= '?' + 0x80,
+  CSET_DEC_Hebrew_Supp		= '4' + 0x80,
+  CSET_DEC_Turkish_Supp		= '0' + 0x80,
+  CSET_NRCS_Greek		= '>' + 0x80,
+  CSET_NRCS_Hebrew		= '=' + 0x80,
+  CSET_NRCS_Turkish		= '2' + 0x80,
 } term_cset;
 
 typedef struct {
   int y, x;
+  bool r;
 } pos;
 
 typedef enum {
   MBT_LEFT = 1, MBT_MIDDLE = 2, MBT_RIGHT = 3, MBT_4 = 4, MBT_5 = 5
 } mouse_button;
 
-enum {
-  NO_UPDATE = 0,
-  PARTIAL_UPDATE = 1,
-  FULL_UPDATE = 2
-};
-
-typedef struct {
-  termline ** buf;
-  int start;
-  int length;
-  int capacity;
-} circbuf;
 
 typedef struct {
   int x;
@@ -323,20 +314,6 @@ typedef struct {
   int update_type;
 } termresults;
 
-typedef struct {
-  short x, y;
-  cattr attr;
-  bool origin;
-  bool autowrap;  // switchable (xterm Wraparound Mode (DECAWM Auto Wrap))
-  bool wrapnext;
-  bool rev_wrap;  // switchable (xterm Reverse-wraparound Mode)
-  short gl, gr;
-  term_cset csets[4];
-  term_cset cset_single;
-  uchar oem_acs;
-  bool utf;
-  bool decnrc_enabled;    /* DECNRCM sequence to enable NRC? */
-} term_cursor;
 
 typedef struct {
   void *fp;
@@ -371,6 +348,22 @@ typedef struct {
   imglist *altlast;
 } termimgs;
 
+
+typedef struct {
+  short x, y;
+  cattr attr;
+  bool origin;
+  bool autowrap;  // switchable (xterm Wraparound Mode (DECAWM Auto Wrap))
+  bool wrapnext;
+  bool rev_wrap;  // switchable (xterm Reverse-wraparound Mode)
+  short gl, gr;
+  term_cset csets[4];
+  term_cset cset_single;
+  uchar oem_acs;
+  bool utf;
+  bool decnrc_enabled;    /* DECNRCM sequence to enable NRC? */
+} term_cursor;
+
 struct term {
   bool on_alt_screen;     /* On alternate screen? */
   bool show_other_screen;
@@ -393,8 +386,8 @@ struct term {
 
   termchar erase_char;
 
-  char *inbuf;            /* terminal input buffer */
-  uint inbuf_size, inbuf_pos;
+  char * suspbuf;         /* suspend output during selection buffer */
+  uint suspbuf_size, suspbuf_pos;
 
   bool rvideo;            /* global reverse video flag */
   bool cursor_on;         /* cursor enabled flag */
@@ -413,6 +406,7 @@ struct term {
   uint printbuf_size, printbuf_pos;
 
   int  rows, cols;
+  int  rows0, cols0;
   bool has_focus;
   bool focus_reported;
   bool in_vbell;
@@ -451,6 +445,7 @@ struct term {
   int  cursor_type;
   int  cursor_blinks;
   bool cursor_invalid;
+  bool hide_mouse;
 
   uchar esc_mod;  // Modifier character in escape sequences
 
@@ -511,8 +506,10 @@ struct term {
   bool locator_rectangle;
   int locator_top, locator_left, locator_bottom, locator_right;
 
-  bool sel_rect, selected;
+  bool selected, sel_rect;
   pos sel_start, sel_end, sel_anchor;
+  bool hovering;
+  pos hover_start, hover_end;
 
  /* Scroll steps during selection when cursor out of window. */
   int sel_scroll;
@@ -558,7 +555,7 @@ extern void term_paint(void);
 extern void term_invalidate(int left, int top, int right, int bottom);
 extern void term_open(void);
 extern void term_copy(void);
-extern void term_paste(wchar *, uint len);
+extern void term_paste(wchar *, uint len, bool all);
 extern void term_send_paste(void);
 extern void term_cancel_paste(void);
 extern void term_cmd(char * cmdpat);

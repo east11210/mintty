@@ -35,9 +35,13 @@ int forkpty(int *, char *, struct termios *, struct winsize *);
 #include <winuser.h>
 #endif
 
+// exit code to use for failure of `exec` (changed from 255, see #745)
+// http://www.tldp.org/LDP/abs/html/exitcodes.html
+#define mexit 126
+
 bool clone_size_token = true;
 
-static string child_dir = null;
+string child_dir = null;
 
 static pid_t pid;
 static bool killed;
@@ -312,7 +316,7 @@ child_create(char *argv[], struct winsize *winp)
     usleep(200000);
 #endif
 
-    exit(255);
+    exit(mexit);
   }
   else { // Parent process.
 #ifdef __midipix__
@@ -394,7 +398,7 @@ child_proc(void)
         if (killed || cfg.hold == HOLD_NEVER)
           exit_mintty();
         else if (cfg.hold == HOLD_START) {
-          if (WIFSIGNALED(status) || WEXITSTATUS(status) != 255)
+          if (WIFSIGNALED(status) || WEXITSTATUS(status) != mexit)
             exit_mintty();
         }
         else if (cfg.hold == HOLD_ERROR) {
@@ -417,7 +421,7 @@ child_proc(void)
           int code = WEXITSTATUS(status);
           if (code == 0)
             err = false;
-          if ((code || cfg.exit_write) && cfg.hold != HOLD_START)
+          if ((code || cfg.exit_write) /*&& cfg.hold != HOLD_START*/)
             //__ %1$s: client command (e.g. shell) terminated, %2$i: exit code
             asprintf(&s, _("%s: Exit %i"), cmd, code);
         }
@@ -451,13 +455,11 @@ child_proc(void)
 
     if (select(win_fd + 1, &fds, 0, 0, timeout_p) > 0) {
       if (pty_fd >= 0 && FD_ISSET(pty_fd, &fds)) {
-#if CYGWIN_VERSION_DLL_MAJOR >= 1005
-        static char buf[4096];
-        int len = read(pty_fd, buf, sizeof buf);
-#else
-        // Pty devices on old Cygwin version deliver only 4 bytes at a time,
+        // Pty devices on old Cygwin versions (pre 1005) deliver only 4 bytes
+        // at a time, and newer ones or MSYS2 deliver up to 256 at a time.
         // so call read() repeatedly until we have a worthwhile haul.
-        static char buf[512];
+        // this avoids most partial updates, results in less flickering/tearing.
+        static char buf[4096];
         uint len = 0;
         do {
           int ret = read(pty_fd, buf + len, sizeof buf - len);
@@ -466,7 +468,6 @@ child_proc(void)
           else
             break;
         } while (len < sizeof buf);
-#endif
         if (len > 0) {
           term_write(buf, len);
           if (log_fd >= 0 && logging)
@@ -504,17 +505,17 @@ child_is_parent(void)
 {
   if (!pid)
     return false;
-  DIR *d = opendir("/proc");
+  DIR * d = opendir("/proc");
   if (!d)
     return false;
   bool res = false;
-  struct dirent *e;
-  char fn[18] = "/proc/";
+  struct dirent * e;
   while ((e = readdir(d))) {
-    char *pn = e->d_name;
+    char * pn = e->d_name;
     if (isdigit((uchar)*pn) && strlen(pn) <= 6) {
-      snprintf(fn + 6, 12, "%s/ppid", pn);
-      FILE *f = fopen(fn, "r");
+      char * fn = asform("/proc/%s/ppid", pn);
+      FILE * f = fopen(fn, "r");
+      free(fn);
       if (!f)
         continue;
       pid_t ppid = 0;
@@ -527,6 +528,117 @@ child_is_parent(void)
     }
   }
   closedir(d);
+  return res;
+}
+
+static struct procinfo {
+  int pid;
+  int ppid;
+  int winpid;
+  char * cmdline;
+} * ttyprocs = 0;
+static uint nttyprocs = 0;
+
+static char *
+procres(int pid, char * res)
+{
+  char fbuf[99];
+  char * fn = asform("/proc/%d/%s", pid, res);
+  int fd = open(fn, O_BINARY | O_RDONLY);
+  free(fn);
+  if (fd < 0)
+    return 0;
+  int n = read(fd, fbuf, sizeof fbuf - 1);
+  close(fd);
+  for (int i = 0; i < n - 1; i++)
+    if (!fbuf[i])
+      fbuf[i] = ' ';
+  fbuf[n] = 0;
+  char * nl = strchr(fbuf, '\n');
+  if (nl)
+    *nl = 0;
+  return strdup(fbuf);
+}
+
+static int
+procresi(int pid, char * res)
+{
+  char * si = procres(pid, res);
+  int i = atoi(si);
+  free(si);
+  return i;
+}
+
+#ifndef HAS_LOCALES
+#define wcwidth xcwidth
+#else
+#if CYGWIN_VERSION_API_MINOR < 74
+#define wcwidth xcwidth
+#endif
+#endif
+
+wchar *
+grandchild_process_list(void)
+{
+  if (!pid)
+    return 0;
+  DIR * d = opendir("/proc");
+  if (!d)
+    return 0;
+  char * tty = child_tty();
+  struct dirent * e;
+  while ((e = readdir(d))) {
+    char * pn = e->d_name;
+    int thispid = atoi(pn);
+    if (thispid && thispid != pid) {
+      char * ctty = procres(thispid, "ctty");
+      if (0 == strcmp(ctty, tty)) {
+        int ppid = procresi(thispid, "ppid");
+        int winpid = procresi(thispid, "winpid");
+        // not including the direct child (pid)
+        ttyprocs = renewn(ttyprocs, nttyprocs + 1);
+        ttyprocs[nttyprocs].pid = thispid;
+        ttyprocs[nttyprocs].ppid = ppid;
+        ttyprocs[nttyprocs].winpid = winpid;
+        char * cmd = procres(thispid, "cmdline");
+        ttyprocs[nttyprocs].cmdline = cmd;
+
+        nttyprocs++;
+      }
+      free(ctty);
+    }
+  }
+  closedir(d);
+
+  wchar * res = 0;
+  for (uint i = 0; i < nttyprocs; i++) {
+    char * proc = newn(char, 50 + strlen(ttyprocs[i].cmdline));
+    sprintf(proc, " %5u %5u %s", ttyprocs[i].winpid, ttyprocs[i].pid, ttyprocs[i].cmdline);
+    free(ttyprocs[i].cmdline);
+    wchar * procw = cs__mbstowcs(proc);
+    free(proc);
+    for (int i = 0; i < 13; i++)
+      if (procw[i] == ' ')
+        procw[i] = 0x2007;  // FIGURE SPACE
+    int wid = min(wcslen(procw), 40);
+    for (int i = 13; i < wid; i++)
+      if ((cfg.charwidth ? xcwidth(procw[i]) : wcwidth(procw[i])) == 2)
+        wid--;
+    procw[wid] = 0;
+
+    if (!res)
+      res = wcsdup(W("╎ WPID   PID  COMMAND\n"));  // ┆┇┊┋╎╏
+    res = renewn(res, wcslen(res) + wcslen(procw) + 3);
+    wcscat(res, W("╎"));
+    wcscat(res, procw);
+    wcscat(res, W("\n"));
+    free(procw);
+  }
+  if (ttyprocs) {
+    nttyprocs = 0;
+    free(ttyprocs);
+    ttyprocs = 0;
+  }
   return res;
 }
 
@@ -599,7 +711,7 @@ foreground_pid()
   return (pty_fd >= 0) ? tcgetpgrp(pty_fd) : 0;
 }
 
-static char *
+char *
 foreground_cwd()
 {
   // if working dir is communicated interactively, use it
@@ -615,18 +727,21 @@ foreground_cwd()
       return 0;
   }
 
+#if CYGWIN_VERSION_DLL_MAJOR >= 1005
   int fg_pid = foreground_pid();
   if (fg_pid > 0) {
     char proc_cwd[32];
     sprintf(proc_cwd, "/proc/%u/cwd", fg_pid);
     return realpath(proc_cwd, 0);
   }
+#endif
   return 0;
 }
 
 char *
 foreground_prog()
 {
+#if CYGWIN_VERSION_DLL_MAJOR >= 1005
   int fg_pid = foreground_pid();
   if (fg_pid > 0) {
     char exename[32];
@@ -645,6 +760,7 @@ foreground_prog()
       return strdup(exebase);
     }
   }
+#endif
   return 0;
 }
 
@@ -690,8 +806,15 @@ user_command(int n)
       }
       n--;
 
-      if (sepp)
+      if (sepp) {
         cmdp = sepp + 1;
+        // check for multi-line separation
+        if (*cmdp == '\\' && cmdp[1] == '\n') {
+          cmdp += 2;
+          while (isspace(*cmdp))
+            cmdp++;
+        }
+      }
       else
         break;
     }
@@ -816,8 +939,11 @@ setup_sync()
   }
 }
 
+/*
+  Called from Alt+F2 (or session launcher via child_launch).
+ */
 void
-child_fork(int argc, char *argv[], int moni)
+do_child_fork(int argc, char *argv[], int moni, bool launch)
 {
   setup_sync();
 
@@ -843,7 +969,7 @@ child_fork(int argc, char *argv[], int moni)
 
     clone = fork();
     if (clone < 0) {
-      exit(255);
+      exit(mexit);
     }
     if (clone > 0) {  // new parent / previous child
       exit(0);  // exit and make the grandchild a daemon
@@ -873,7 +999,9 @@ child_fork(int argc, char *argv[], int moni)
       }
 
       chdir(set_dir);
-      setenv("PWD", set_dir, true);
+      setenv("PWD", set_dir, true);  // avoid softlink resolution
+      if (!launch)
+        setenv("CHERE_INVOKING", "mintty", true);
 
       if (support_wsl)
         delete(set_dir);
@@ -924,6 +1052,14 @@ child_fork(int argc, char *argv[], int moni)
     //setenv("MINTTY_CHILD", "1", true);
 
 #if CYGWIN_VERSION_DLL_MAJOR >= 1005
+    if (shortcut) {
+      //show_info(asform("Starting <%s>", cs__wcstoutf(shortcut)));
+      shell_exec(shortcut);
+      //show_info("Started");
+      sleep(5);  // let starting settle, or it will fail; 1s normally enough
+      exit(0);
+    }
+
     execv("/proc/self/exe", argv);
 #else
     // /proc/self/exe isn't available before Cygwin 1.5, so use argv[0] instead.
@@ -936,11 +1072,23 @@ child_fork(int argc, char *argv[], int moni)
     }
     execvp(path, argv);
 #endif
-    exit(255);
+    exit(mexit);
   }
   reset_fork_mode();
 }
 
+/*
+  Called from Alt+F2.
+ */
+void
+child_fork(int argc, char *argv[], int moni)
+{
+  do_child_fork(argc, argv, moni, false);
+}
+
+/*
+  Called from session launcher.
+ */
 void
 child_launch(int n, int argc, char * argv[], int moni)
 {
@@ -978,14 +1126,21 @@ child_launch(int n, int argc, char * argv[], int moni)
           }
         }
         new_argv[argc] = 0;
-        child_fork(argc, new_argv, moni);
+        do_child_fork(argc, new_argv, moni, true);
         free(new_argv);
         break;
       }
       n--;
 
-      if (sepp)
+      if (sepp) {
         cmdp = sepp + 1;
+        // check for multi-line separation
+        if (*cmdp == '\\' && cmdp[1] == '\n') {
+          cmdp += 2;
+          while (isspace(*cmdp))
+            cmdp++;
+        }
+      }
       else
         break;
     }

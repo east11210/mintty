@@ -76,6 +76,11 @@ These sequences can be used to hide or show the scrollbar, whereby the window si
 | `^[[?7766l`   | hide          |
 | `^[[?7766h`   | show          |
 
+Note: Mintty also supports the xterm-compatible sequences to hide or show 
+the scrollbar, which handle the scrollbar as "outer" to the terminal, 
+adding to the window width but keeping the terminal width unchanged 
+(except in full-screen mode).
+
 
 ## Shortcut override mode ##
 
@@ -253,12 +258,28 @@ Consistent changing could be achieved with a shell script like
 to be declared in your shell profile (e.g. `$HOME/.bashrc`).
 
 
-## Window title ##
+## Window title copy ##
 
 The following _OSC_ ("operating system command") sequence can be used to copy 
 the window title to the Windows clipboard (like menu function "Copy Title"):
 
 > `^[]7721;1^G`
+
+
+## Window title set ##
+
+The following _OSC_ ("operating system command") sequence can be used to 
+set the window title (alternatively to OSC 2):
+
+> `^[]l;1^G`
+
+
+## Window icon ##
+
+The following _OSC_ ("operating system command") sequence can be used to 
+set the window icon from the given file and optional icon index:
+
+> `^[]I;icon_file,index^G`
 
 
 ## Working directory ##

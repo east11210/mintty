@@ -4,6 +4,7 @@
 #include <termios.h>
 
 extern bool clone_size_token;
+extern string child_dir;
 
 extern void child_update_charset(void);
 extern void child_create(char * argv[], struct winsize * winp);
@@ -19,6 +20,7 @@ extern void child_sendw(const wchar *, uint len);
 extern void child_resize(struct winsize * winp);
 extern bool child_is_alive(void);
 extern bool child_is_parent(void);
+extern wchar * grandchild_process_list(void);
 extern char * child_tty(void);
 extern char * foreground_prog(void);  // to be free()d
 extern void user_command(int n);

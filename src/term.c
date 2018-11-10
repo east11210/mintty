@@ -13,16 +13,33 @@
 
 struct term term;
 
+typedef struct {
+  termline ** buf;
+  int start;
+  int length;
+  int capacity;
+} circbuf;
+
+enum {
+  NO_UPDATE = 0,
+  PARTIAL_UPDATE = 1,
+  FULL_UPDATE = 2
+};
+
 static int markpos = 0;
 static bool markpos_valid = false;
 
 const cattr CATTR_DEFAULT =
-            {.attr = ATTR_DEFAULT, .truefg = 0, .truebg = 0};
+            {.attr = ATTR_DEFAULT,
+             .truefg = 0, .truebg = 0, .ulcolr = (colour)-1};
 
-termchar basic_erase_char = {.cc_next = 0, .chr = ' ',
-                    /* CATTR_DEFAULT */
-                    .attr = {.attr = ATTR_DEFAULT, .truefg = 0, .truebg = 0}
-                    };
+termchar basic_erase_char =
+   {.cc_next = 0, .chr = ' ',
+            /* CATTR_DEFAULT */
+    .attr = {.attr = ATTR_DEFAULT | TATTR_CLEAR,
+             .truefg = 0, .truebg = 0, .ulcolr = (colour)-1}
+   };
+
 
 static bool
 vt220(string term)
@@ -48,7 +65,7 @@ tblink_cb(void)
 {
   term.tblinker = !term.tblinker;
   term_schedule_tblink();
-  win_update();
+  win_update(false);
 }
 
 static void
@@ -65,7 +82,7 @@ tblink2_cb(void)
 {
   term.tblinker2 = !term.tblinker2;
   term_schedule_tblink2();
-  win_update();
+  win_update(false);
 }
 
 static void
@@ -85,7 +102,7 @@ cblink_cb(void)
 {
   term.cblinker = !term.cblinker;
   term_schedule_cblink();
-  win_update();
+  win_update(false);
 }
 
 void
@@ -101,7 +118,7 @@ static void
 vbell_cb(void)
 {
   term.in_vbell = false;
-  win_update();
+  win_update(false);
 }
 
 void
@@ -176,6 +193,7 @@ term_reset(bool full)
   term.app_cursor_keys = false;
 
   if (full) {
+    term.deccolm_allowed = cfg.enable_deccolm_init;  // not reset by xterm
     term.vt220_keys = vt220(cfg.term);  // not reset by xterm
     term.app_keypad = false;  // xterm only with RIS
     term.app_wheel = false;
@@ -207,7 +225,6 @@ term_reset(bool full)
     term.wheel_reporting = true;
     term.echoing = false;
     term.bracketed_paste = false;
-    term.show_scrollbar = true;  // enable_scrollbar not reset by xterm
     term.wide_indic = false;
     term.wide_extra = false;
     term.disable_bidi = false;
@@ -226,13 +243,15 @@ term_reset(bool full)
   term.sixel_scrolls_left = 0;
 
   term.cursor_type = -1;
+  term.cursor_blinks = -1;
   if (full) {
-    term.cursor_blinks = -1;  // not reset by xterm
     term.blink_is_real = cfg.allow_blinking;
+    term.hide_mouse = cfg.hide_mouse;
   }
 
   if (full) {
     term.selected = false;
+    term.hovering = false;
     term.on_alt_screen = false;
     term_print_finish();
     if (term.lines) {
@@ -258,11 +277,12 @@ term_reset(bool full)
 }
 
 static void
-show_screen(bool other_screen)
+show_screen(bool other_screen, bool flip)
 {
   term.show_other_screen = other_screen;
   term.disptop = 0;
-  term.selected = false;
+  if (flip || cfg.input_clears_selection)
+    term.selected = false;
 
   // Reset cursor blinking.
   if (!other_screen) {
@@ -270,21 +290,21 @@ show_screen(bool other_screen)
     term_schedule_cblink();
   }
 
-  win_update();
+  win_update(false);
 }
 
 /* Return to active screen and reset scrollback */
 void
 term_reset_screen(void)
 {
-  show_screen(false);
+  show_screen(false, false);
 }
 
 /* Switch display to other screen and reset scrollback */
 void
 term_flip_screen(void)
 {
-  show_screen(!term.show_other_screen);
+  show_screen(!term.show_other_screen, true);
 }
 
 /* Apply changed settings */
@@ -868,6 +888,8 @@ term_resize(int newrows, int newcols)
 
   term.rows = newrows;
   term.cols = newcols;
+  term.rows0 = newrows;
+  term.cols0 = newcols;
 
   term_switch_screen(on_alt_screen, false);
 }
@@ -945,6 +967,75 @@ term_check_boundary(int x, int y)
   }
 }
 
+
+#ifdef use_display_scrolling
+
+/*
+   Scroll the actual display (window contents and its cache).
+ */
+static int dispscroll_top, dispscroll_bot, dispscroll_lines = 0;
+
+static void
+disp_scroll(int topscroll, int botscroll, int scrolllines)
+{
+  if (dispscroll_lines) {
+    dispscroll_lines += scrolllines;
+    dispscroll_top = (dispscroll_top + topscroll) / 2;
+    dispscroll_bot = (dispscroll_bot + botscroll) / 2;
+  }
+  else {
+    dispscroll_top = topscroll;
+    dispscroll_bot = botscroll;
+    dispscroll_lines = scrolllines;
+  }
+}
+
+/*
+   Perform actual display scrolling.
+   Invoke window scrolling and if successful, adjust display cache.
+ */
+static void
+disp_do_scroll(int topscroll, int botscroll, int scrolllines)
+{
+  if (!win_do_scroll(topscroll, botscroll, scrolllines))
+    return;
+
+  // update display cache
+  bool down = scrolllines < 0;
+  int lines = abs(scrolllines);
+  termline * recycled[lines];
+  if (down) {
+    for (int l = 0; l < lines; l++) {
+      recycled[l] = term.displines[botscroll - 1 - l];
+      clearline(recycled[l]);
+      for (int j = 0; j < term.cols; j++)
+        recycled[l]->chars[j].attr.attr |= ATTR_INVALID;
+    }
+    for (int l = botscroll - 1; l >= topscroll + lines; l--) {
+      term.displines[l] = term.displines[l - lines];
+    }
+    for (int l = 0; l < lines; l++) {
+      term.displines[topscroll + l] = recycled[l];
+    }
+  }
+  else {
+    for (int l = 0; l < lines; l++) {
+      recycled[l] = term.displines[topscroll + l];
+      clearline(recycled[l]);
+      for (int j = 0; j < term.cols; j++)
+        recycled[l]->chars[j].attr.attr |= ATTR_INVALID;
+    }
+    for (int l = topscroll; l < botscroll - lines; l++) {
+      term.displines[l] = term.displines[l + lines];
+    }
+    for (int l = 0; l < lines; l++) {
+      term.displines[botscroll - 1 - l] = recycled[l];
+    }
+  }
+}
+
+#endif
+
 /*
  * Scroll the screen. (`lines' is +ve for scrolling forward, -ve
  * for backward.) `sb' is true if the scrolling is permitted to
@@ -953,6 +1044,15 @@ term_check_boundary(int x, int y)
 void
 term_do_scroll(int topline, int botline, int lines, bool sb)
 {
+  if (term.hovering) {
+    term.hovering = false;
+    win_update(true);
+  }
+
+#ifdef use_display_scrolling
+  int scrolllines = lines;
+#endif
+
   markpos_valid = false;
   assert(botline >= topline && lines != 0);
 
@@ -972,6 +1072,18 @@ term_do_scroll(int topline, int botline, int lines, bool sb)
   // Useful pointers to the top and (one below the) bottom lines.
   termline **top = term.lines + topline;
   termline **bot = term.lines + botline;
+
+#ifdef use_display_scrolling
+  // Screen scrolling
+  int topscroll = topline - term.disptop;
+  if (topscroll < term.rows) {
+    int botscroll = min(botline - term.disptop, term.rows);
+    if (!down && term.disptop && !topline)
+      ; // ignore bottom forward scroll if scrolled back
+    else
+      disp_scroll(topscroll, botscroll, scrolllines);
+  }
+#endif
 
   // Reuse lines that are being scrolled out of the scroll region,
   // clearing their content.
@@ -1045,8 +1157,22 @@ term_do_scroll(int topline, int botline, int lines, bool sb)
 void
 term_erase(bool selective, bool line_only, bool from_begin, bool to_end)
 {
-  term_cursor *curs = &term.curs;
+  term_cursor * curs = &term.curs;
   pos start, end;
+
+  // avoid clearing a "pending wrap" position, where the cursor is 
+  // held back on the previous character if it's the last of the line
+  if (curs->wrapnext) {
+#if 0
+    if (!from_begin && to_end)
+      return;  // simple approach
+#else
+    static term_cursor c;
+    c = term.curs;
+    incpos(c);
+    curs = &c;
+#endif
+  }
 
   if (from_begin)
     start = (pos){.y = line_only ? curs->y : 0, .x = 0};
@@ -1093,13 +1219,19 @@ term_erase(bool selective, bool line_only, bool from_begin, bool to_end)
         else
           line->lattr = LATTR_NORM;
       }
-      else if (!selective || !(line->chars[start.x].attr.attr & ATTR_PROTECTED))
+      else if (!selective ||
+               !(line->chars[start.x].attr.attr & ATTR_PROTECTED)
+              )
+      {
         line->chars[start.x] = term.erase_char;
+        line->chars[start.x].attr.attr |= TATTR_CLEAR;
+      }
       if (inclpos(start, cols) && start.y < term.rows)
         line = term.lines[start.y];
     }
   }
 }
+
 
 #define EM_pres 1
 #define EM_pict 2
@@ -1160,8 +1292,9 @@ emoji_tags(int i)
 #endif
 
 struct emoji_seq {
-  void * res;  // filename (char*/wchar*) or cached image
-  echar chs[8];
+  void * res;   // filename (char*/wchar*) or cached image
+  echar chs[8]; // code points
+  char * name;  // short name in emoji-sequences.txt, emoji-zwj-sequences.txt
 };
 
 struct emoji_seq emoji_seqs[] = {
@@ -1176,6 +1309,32 @@ struct emoji {
 } __attribute__((packed));
 
 #define dont_debug_emojis 1
+
+/*
+   Get emoji sequence "short name".
+ */
+char *
+get_emoji_description(termchar * cpoi)
+{
+  //struct emoji e = (struct emoji) cpoi->attr.truefg;
+  struct emoji * ee = (void *)&cpoi->attr.truefg;
+
+  if (ee->seq) {
+    char * en = strdup("");
+    for (uint i = 0; i < lengthof(emoji_seqs->chs) && ed(emoji_seqs[ee->idx].chs[i]); i++) {
+      xchar xc = ed(emoji_seqs[ee->idx].chs[i]);
+      char ec[8];
+      sprintf(ec, "U+%04X", xc);
+      strappend(en, ec);
+      strappend(en, " ");
+    }
+    strappend(en, "| Emoji sequence: ");
+    strappend(en, emoji_seqs[ee->idx].name);
+    return en;
+  }
+  else
+    return 0;
+}
 
 /*
    Derive file name and path name from emoji sequence; store it.
@@ -1237,7 +1396,7 @@ fallback:;
       return false;
   }
   char * en = strdup(pre);
-  char ec[6];
+  char ec[7];
   if (e.seq) {
     for (uint i = 0; i < lengthof(emoji_seqs->chs) && ed(emoji_seqs[e.idx].chs[i]); i++) {
       xchar xc = ed(emoji_seqs[e.idx].chs[i]);
@@ -1250,7 +1409,7 @@ fallback:;
     }
   }
   else {
-    sprintf(ec, "%04x", emoji_bases[e.idx].ch);
+    snprintf(ec, 7, "%04x", emoji_bases[e.idx].ch);
     strappend(en, ec);
   }
   strappend(en, suf);
@@ -1427,25 +1586,41 @@ match_emoji(termchar * d, int maxlen)
 	1	X FE0E		variation seq: strip; normal display
 	1	X FE0F		variation seq: emoji display
 	1	X [Emoji_Presentation]	emoji display
-	1	X [Extended_Pictographic]	if not in variation seq
+	1	X [Extended_Pictographic]	if not a variation (none)
        */
       if ((tags & EM_text) && combchr == 0xFE0E) {
-        // strip VARIATION SELECTOR-15, display text style
-        d->cc_next = 0;
+        // VARIATION SELECTOR-15: display text style
         emoji.len = 0;
       }
       else if ((tags & EM_emoj) && combchr == 0xFE0F) {
-        // strip VARIATION SELECTOR-16, display emoji style
-        d->cc_next = 0;
+        // VARIATION SELECTOR-16: display emoji style
       }
-      else if ((tags & EM_pres) && !combchr) {
+      else if (combchr) {
+        emoji.len = 0;  // suppress emoji style with combining
+      }
+      else if (tags & EM_pres) {
         // display presentation
       }
-      else if ((tags & EM_pict) && !(tags & (EM_text | EM_emoj)) && !combchr) {
-        // display pictographic
+      else if ((tags & (EM_emoj | EM_pres | EM_pict)) && (d->attr.attr & ATTR_FRAMED)) {
+        // with explicit attribute, display pictographic
       }
-      else
+#ifdef support_only_pictographics
+      else if ((tags & EM_pict) && !(tags & (EM_text | EM_emoj))) {
+        // we could support this group to display pictographic,
+        // however, there are no emoji graphics for them anyway, so:
         emoji.len = 0;
+      }
+#endif
+#ifdef support_other_pictographics
+      else if ((tags & EM_pict) && (tags & (EM_text | EM_emoj))) {
+        // we could support this group to display pictographic,
+        // however, Unicode specifies them for explicit variations,
+        // so let's default to text style
+        emoji.len = 0;
+      }
+#endif
+      else
+        emoji.len = 0;  // display text style
     }
     if (!emoji.len) {
       // not found another match; if we had a "longest match" before, 
@@ -1479,6 +1654,13 @@ emoji_show(int x, int y, struct emoji e, int elen, cattr eattr, ushort lattr)
 void
 term_paint(void)
 {
+#ifdef use_display_scrolling
+  if (dispscroll_lines) {
+    disp_do_scroll(dispscroll_top, dispscroll_bot, dispscroll_lines);
+    dispscroll_lines = 0;
+  }
+#endif
+
  /* The display line that the cursor is on, or -1 if the cursor is invisible. */
   int curs_y =
     term.cursor_on && !term.show_other_screen
@@ -1530,6 +1712,8 @@ term_paint(void)
         );
 
       if (selected) {
+        tattr.attr |= TATTR_SELECTED;
+
         colour bg = win_get_colour(SEL_COLOUR_I);
         if (bg != (colour)-1) {
           tattr.truebg = bg;
@@ -1547,6 +1731,16 @@ term_paint(void)
         }
         else
           tattr.attr ^= ATTR_REVERSE;
+      }
+
+      if (term.hovering &&
+          posle(term.hover_start, scrpos) && poslt(scrpos, term.hover_end)) {
+        tattr.attr &= ~UNDER_MASK;
+        tattr.attr |= ATTR_UNDER;
+        if (cfg.hover_colour != (colour)-1) {
+          tattr.attr |= ATTR_ULCOLOUR;
+          tattr.ulcolr = cfg.hover_colour;
+        }
       }
 
       bool flashchar = term.in_vbell &&
@@ -1597,9 +1791,6 @@ term_paint(void)
         tattr.attr &= ~ATTR_BLINK2;
       }
 
-#ifdef handle_emojis_in_loop_1
-      ... active code below
-#endif
      /* Match emoji sequences
       * and replace by emoji indicators
       */
@@ -1621,7 +1812,7 @@ term_paint(void)
           // check whether all emoji components have the same attributes
           bool equalattrs = true;
           for (int i = 1; i < e.len && equalattrs; i++) {
-#           define IGNATTR (ATTR_WIDE | ATTR_FGMASK | TATTR_COMBINING)
+# define IGNATTR (ATTR_WIDE | ATTR_FGMASK | TATTR_COMBINING)
             if ((d[i].attr.attr & ~IGNATTR) != (d->attr.attr & ~IGNATTR)
                || d[i].attr.truebg != d->attr.truebg
                )
@@ -1633,14 +1824,25 @@ term_paint(void)
 
           // modify character data to trigger later emoji display
           if (ok && equalattrs) {
-            d->attr.attr &= ~ ATTR_FGMASK;
+            d->attr.attr &= ~ATTR_FGMASK;
             d->attr.attr |= TATTR_EMOJI | e.len;
+
             //d->attr.truefg = (uint)e;
             struct emoji * ee = &e;
             uint em = *(uint *)ee;
             d->attr.truefg = em;
+
+            // refresh cached copy to avoid display delay
+            if (tattr.attr & TATTR_SELECTED) {
+              tattr = d->attr;
+              // need to propagate this to enable emoji highlighting
+              tattr.attr |= TATTR_SELECTED;
+            }
+            else
+              tattr = d->attr;
+            // inhibit rendering of subsequent emoji sequence components
             for (int i = 1; i < e.len; i++) {
-              d[i].attr.attr &= ~ ATTR_FGMASK;
+              d[i].attr.attr &= ~ATTR_FGMASK;
               d[i].attr.attr |= TATTR_EMOJI;
               d[i].attr.truefg = em;
             }
@@ -1734,6 +1936,10 @@ term_paint(void)
 
       if (term.cursor_invalid)
         dispchars[curs_x].attr.attr |= ATTR_INVALID;
+
+      // try to fix #612 "cursor isn’t hidden right away"
+      if (newchars[curs_x].attr.attr != dispchars[curs_x].attr.attr)
+        dispchars[curs_x].attr.attr |= ATTR_INVALID;
     }
 
    /*
@@ -1764,12 +1970,6 @@ term_paint(void)
     bool firstdirtyitalic = false;
     bool dirtyrect = false;
     for (int j = 0; j < term.cols; j++) {
-#ifdef handle_emojis_in_loop_2
-      termchar *d = chars + j;
-      cattr tattr = newchars[j].attr;
-      ... code from above
-#endif
-
       if (dispchars[j].attr.attr & DATTR_STARTRUN) {
         laststart = j;
         dirtyrect = false;
@@ -1781,6 +1981,7 @@ term_paint(void)
           && (dispchars[j].chr != newchars[j].chr
               || (dispchars[j].attr.truefg != newchars[j].attr.truefg)
               || (dispchars[j].attr.truebg != newchars[j].attr.truebg)
+              || (dispchars[j].attr.ulcolr != newchars[j].attr.ulcolr)
               || (dispchars[j].attr.attr & ~DATTR_STARTRUN) != newchars[j].attr.attr
               || (prevdirtyitalic && (dispchars[j].attr.attr & DATTR_STARTRUN))
              ))
@@ -1814,6 +2015,13 @@ term_paint(void)
    /*
     * Finally, loop once more and actually do the drawing.
     */
+    // control line overlay; as opposed to character overlay implemented 
+    // by the "pending overlay" buffer below, this works by repeating 
+    // the last line loop and only drawing the overlay characters this time
+    bool overlaying = false;
+    overlay:;
+    bool do_overlay = false;
+
     int maxtextlen = max(term.cols, 16);
     wchar text[maxtextlen];
     cattr textattr[maxtextlen];
@@ -1862,8 +2070,12 @@ term_paint(void)
       wchar t[len + 1]; wcsncpy(t, text, len); t[len] = 0;
       for (int i = len - 1; i >= 0 && t[i] == ' '; i--)
         t[i] = 0;
-      if (*t)
+      if (*t) {
         printf("out <%ls>\n", t);
+        for (int i = 0; i < len; i++)
+          printf(" %04X", t[i]);
+        printf("\n");
+      }
 #endif
       if (attr.attr & TATTR_EMOJI) {
         int elen = attr.attr & ATTR_FGMASK;
@@ -1871,17 +2083,45 @@ term_paint(void)
         eattr.attr &= ~(ATTR_WIDE | TATTR_COMBINING);
         wchar esp[] = W("        ");
         if (elen) {
-          win_text(x, y, esp, elen, eattr, textattr, lattr | LATTR_DISP1, has_rtl);
+          if (!overlaying) {
+            if (newchars[x].attr.attr & TATTR_SELECTED) {
+              // here we handle background colour once more because
+              // somehow the selection highlighting information from above
+              // got lost in the chaos of chars[], newchars[], attr, tattr...
+              // some substantial revision might be good here, in theory...
+
+              // the main problem here is the reuse of truefg as an 
+              // emoji indicator; we have to make sure truefg isn't 
+              // used anymore for an emoji...
+              eattr.attr |= TATTR_SELECTED;
+              colour bg = eattr.attr & ATTR_REVERSE
+                          ? win_get_colour(SEL_TEXT_COLOUR_I)
+                          : win_get_colour(SEL_COLOUR_I);
+              if (bg == (colour)-1)
+                bg = eattr.attr & ATTR_REVERSE
+                          ? win_get_colour(BG_COLOUR_I)
+                          : win_get_colour(FG_COLOUR_I);
+              eattr.truebg = bg;
+              eattr.attr = (eattr.attr & ~ATTR_BGMASK) | (TRUE_COLOUR << ATTR_BGSHIFT);
+              eattr.attr &= ~ATTR_REVERSE;
+            }
+
+            win_text(x, y, esp, elen, eattr, textattr, lattr | LATTR_DISP1, has_rtl);
+            flush_text();
+          }
 #ifdef debug_emojis
           eattr.attr &= ~(ATTR_BGMASK | ATTR_FGMASK);
           eattr.attr |= 6 << ATTR_BGSHIFT | 4;
           esp[0] = '0' + elen;
           win_text(x, y, esp, elen, eattr, textattr, lattr | LATTR_DISP2, has_rtl);
 #endif
-
-          //struct emoji e = (struct emoji) eattr.truefg;
-          struct emoji * ee = (void *)&eattr.truefg;
-          emoji_show(x, y, *ee, elen, eattr, lattr);
+          if (cfg.emoji_placement == EMPL_FULL && !overlaying)
+            do_overlay = true;  // display in overlaying loop
+          else {
+            //struct emoji e = (struct emoji) eattr.truefg;
+            struct emoji * ee = (void *)&eattr.truefg;
+            emoji_show(x, y, *ee, elen, eattr, lattr);
+          }
         }
 #ifdef debug_emojis
         else {
@@ -1891,6 +2131,9 @@ term_paint(void)
           win_text(x, y, esp, 1, eattr, textattr, lattr | LATTR_DISP2, has_rtl);
         }
 #endif
+      }
+      else if (overlaying) {
+        return;
       }
       else if (attr.attr & (ATTR_ITALIC | TATTR_COMBDOUBL)) {
         win_text(x, y, text, len, attr, textattr, lattr | LATTR_DISP1, has_rtl);
@@ -1904,18 +2147,31 @@ term_paint(void)
         ovl_lattr = lattr;
         ovl_has_rtl = has_rtl;
       }
-      else
+      else {
         win_text(x, y, text, len, attr, textattr, lattr, has_rtl);
+        flush_text();
+      }
     }
 
+   /*
+    * Third loop, for actual drawing.
+    */
     for (int j = 0; j < term.cols; j++) {
       termchar *d = chars + j;
       cattr tattr = newchars[j].attr;
       wchar tchar = newchars[j].chr;
-      //wchar tchar2 = j + 1 < term.cols ? d[1].chr : 0;
-
-#ifdef handle_emojis_in_loop_3
-      ... code from above
+      // Note: newchars[j].cc_next is always 0; use chars[]
+      xchar xtchar = tchar;
+#ifdef proper_non_BMP_classification
+      // this is the correct way to later check for the bidi_class,
+      // but let's not touch non-BMP here for now because:
+      // - some non-BMP ranges do not align to cell width (e.g. Hieroglyphs)
+      // - right-to-left non-BMP does not work (GetCharacterPlacementW fails)
+      if (is_high_surrogate(tchar) && chars[j].cc_next) {
+        termchar *t1 = &chars[j + chars[j].cc_next];
+        if (is_low_surrogate(t1->chr))
+          xtchar = combine_surrogates(tchar, t1->chr);
+      }
 #endif
 
       if ((dispchars[j].attr.attr ^ tattr.attr) & ATTR_WIDE)
@@ -1929,8 +2185,9 @@ term_paint(void)
 #endif
 
       bool break_run = (tattr.attr != attr.attr)
-                       || (tattr.truefg != attr.truefg)
-                       || (tattr.truebg != attr.truebg);
+                    || (tattr.truefg != attr.truefg)
+                    || (tattr.truebg != attr.truebg)
+                    || (tattr.ulcolr != attr.ulcolr);
 
       inline bool has_comb(termchar * tc)
       {
@@ -1949,6 +2206,16 @@ term_paint(void)
         trace_run("cc"), break_run = true;
 
 #ifdef keep_non_BMP_characters_together_in_one_chunk
+      // this was expected to speed up non-BMP display 
+      // but the effect is not significant, if any
+      // also, this spoils two other issues about non-BMP display:
+#warning non-BMP RTL will be in wrong order
+#warning some non-BMP ranges (e.g. Egyptian Hieroglyphs) are not cell-adjusted
+     /*
+      * Break when exceeding output buffer length.
+      */
+      if (is_high_surrogate(d->chr) && textlen + 2 >= maxtextlen)
+        trace_run("max"), break_run = true;
      /*
       * Break when switching BMP/non-BMP.
       */
@@ -1970,15 +2237,7 @@ term_paint(void)
           trace_run("len"), break_run = true;
       }
 
-      uchar tbc = bidi_class(tchar);
-#ifdef dont_break_at_non_BMP
-#warning would need buffer overflow handling!
-#warning has no effect this way, and does not seem to be needed...
-      if ((tchar & 0xFC00) == 0xD800 && (tchar2 & 0xFC00) == 0xDC00)
-        tbc = bidi_class(((ucschar) (tchar - 0xD7C0) << 10) | (tchar2 & 0x03FF));
-      else
-        tbc = bidi_class(tchar);
-#endif
+      uchar tbc = bidi_class(xtchar);
 
       if (textlen && tbc != bc) {
         if (!is_sep_class(tbc) && !is_sep_class(bc))
@@ -1992,7 +2251,7 @@ term_paint(void)
       bc = tbc;
 
       if (break_run) {
-        if (dirty_run && textlen)
+        if ((dirty_run && textlen) || overlaying)
           out_text(start, i, text, textlen, attr, textattr, line->lattr, has_rtl);
         start = j;
         textlen = 0;
@@ -2035,17 +2294,24 @@ term_paint(void)
           wchar prev = dd->chr;
 #endif
           dd += dd->cc_next;
+
+          // mark combining unless pseudo-combining surrogates
+          if (!is_low_surrogate(dd->chr)) {
+            if (tattr.attr & TATTR_EMOJI)
+              break;
+            attr.attr |= TATTR_COMBINING;
+          }
           if (combiningdouble(dd->chr))
             attr.attr |= TATTR_COMBDOUBL;
+
           textattr[textlen] = dd->attr;
-          // hide bidi isolate mark glyphs (if handled zero-width)
-          if (dd->chr >= 0x2066 && dd->chr <= 0x2069)
+          if (cfg.emojis && dd->chr == 0xFE0E)
+            ; // skip text style variation selector
+          else if (dd->chr >= 0x2066 && dd->chr <= 0x2069)
+            // hide bidi isolate mark glyphs (if handled zero-width)
             text[textlen++] = 0x200B;  // zero width space
           else
             text[textlen++] = dd->chr;
-          // mark combining unless pseudo-combining surrogates
-          if ((dd->chr & 0xFC00) != 0xDC00)
-            attr.attr |= TATTR_COMBINING;
 #ifdef debug_surrogates
           ucschar comb = 0xFFFFF;
           if ((prev & 0xFC00) == 0xD800 && (dd->chr & 0xFC00) == 0xDC00)
@@ -2080,8 +2346,20 @@ term_paint(void)
     }
     if (dirty_run && textlen)
       out_text(start, i, text, textlen, attr, textattr, line->lattr, has_rtl);
-    flush_text();
+    if (!overlaying)
+      flush_text();
 
+   /*
+    * Draw any pending overlay characters in one more loop.
+    */
+    if (do_overlay && !overlaying) {
+      overlaying = true;
+      goto overlay;
+    }
+
+   /*
+    * Release the line data fetched from the screen or scrollback buffer.
+    */
     release_line(line);
   }
 
@@ -2122,6 +2400,11 @@ term_invalidate(int left, int top, int right, int bottom)
 void
 term_scroll(int rel, int where)
 {
+  if (term.hovering) {
+    term.hovering = false;
+    win_update(true);
+  }
+
   int sbtop = -sblines();
   int sbbot = term_last_nonempty_line();
   bool do_schedule_update = false;
@@ -2149,7 +2432,7 @@ term_scroll(int rel, int where)
     term.disptop = sbtop;
   if (term.disptop > 0)
     term.disptop = 0;
-  win_update();
+  win_update(false);
 
   if (do_schedule_update) {
     win_schedule_update();
@@ -2160,10 +2443,14 @@ term_scroll(int rel, int where)
 void
 term_set_focus(bool has_focus, bool may_report)
 {
+  if (!has_focus)
+    term.hovering = false;
+
   if (has_focus != term.has_focus) {
     term.has_focus = has_focus;
     term_schedule_cblink();
   }
+
   if (has_focus != term.focus_reported && may_report) {
     term.focus_reported = has_focus;
     if (term.report_focus)
@@ -2199,6 +2486,6 @@ term_hide_cursor(void)
 {
   if (term.cursor_on) {
     term.cursor_on = false;
-    win_update();
+    win_update(false);
   }
 }

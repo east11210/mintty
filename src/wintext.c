@@ -1,5 +1,5 @@
 // wintext.c (part of mintty)
-// Copyright 2008-13 Andy Koppe
+// Copyright 2008-13 Andy Koppe, 2015-2018 Thomas Wolff
 // Adapted from code from PuTTY-0.60 by Simon Tatham and team.
 // Licensed under the terms of the GNU General Public License v3 or later.
 
@@ -122,6 +122,8 @@ struct fontfam {
   // VT100 linedraw character mappings for current font:
   wchar win_linedraw_chars[LDRAW_CHAR_NUM];
 } fontfamilies[11];
+
+int line_scale;
 
 wchar
 win_linedraw_char(int i)
@@ -446,7 +448,6 @@ win_init_fontfamily(HDC dc, int findex)
 
   trace_resize(("--- init_fontfamily\n"));
   TEXTMETRIC tm;
-  int fontsize[FONT_UNDERLINE + 1];
 
   for (uint i = 0; i < FONT_BOLDITAL; i++) {
     if (ff->fonts[i])
@@ -514,6 +515,12 @@ win_init_fontfamily(HDC dc, int findex)
   }
 #endif
 
+  float latin_char_width, greek_char_width, line_char_width, cjk_char_width;
+  GetCharWidthFloatW(dc, 0x0041, 0x0041, &latin_char_width);
+  GetCharWidthFloatW(dc, 0x03B1, 0x03B1, &greek_char_width);
+  GetCharWidthFloatW(dc, 0x2500, 0x2500, &line_char_width);
+  GetCharWidthFloatW(dc, 0x4E00, 0x4E00, &cjk_char_width);
+
   if (!findex) {
     ff->row_spacing = row_padding(tm.tmInternalLeading, tm.tmExternalLeading);
     trace_font(("00 height %d avwidth %d asc %d dsc %d intlead %d extlead %d %ls\n", 
@@ -530,7 +537,10 @@ win_init_fontfamily(HDC dc, int findex)
     ff->col_spacing = cfg.col_spacing;
 
     cell_height = tm.tmHeight + ff->row_spacing;
-    cell_width = tm.tmAveCharWidth + ff->col_spacing;
+    //cell_width = tm.tmAveCharWidth + ff->col_spacing;
+    cell_width = (int)(latin_char_width * 16) + ff->col_spacing;
+
+    line_scale = cell_height * 100 / abs(font_height);
 
     PADDING = tm.tmAveCharWidth;
     if (cfg.padding >= 0 && cfg.padding < PADDING)
@@ -538,20 +548,18 @@ win_init_fontfamily(HDC dc, int findex)
   }
   else {
     ff->row_spacing = cell_height - tm.tmHeight;
-    ff->col_spacing = cell_width - tm.tmAveCharWidth;
+    //ff->col_spacing = cell_width - tm.tmAveCharWidth;
+    ff->col_spacing = cell_width - (int)(latin_char_width * 16);
   }
 
 #ifdef debug_create_font
   printf("size %d -> height %d -> height %d\n", font_size, font_height, cell_height);
 #endif
 
-  ff->font_dualwidth = (tm.tmMaxCharWidth >= tm.tmAveCharWidth * 3 / 2);
+  //ff->font_dualwidth = (tm.tmMaxCharWidth >= tm.tmAveCharWidth * 3 / 2);
+  ff->font_dualwidth = (cjk_char_width >= latin_char_width * 3 / 2);
 
   // Determine whether ambiguous-width characters are wide in this font */
-  float latin_char_width, greek_char_width, line_char_width;
-  GetCharWidthFloatW(dc, 0x0041, 0x0041, &latin_char_width);
-  GetCharWidthFloatW(dc, 0x03B1, 0x03B1, &greek_char_width);
-  GetCharWidthFloatW(dc, 0x2500, 0x2500, &line_char_width);
   if (!findex)
     font_ambig_wide =
       greek_char_width >= latin_char_width * 1.5 ||
@@ -648,6 +656,7 @@ win_init_fontfamily(HDC dc, int findex)
   if (ff->descent >= cell_height)
     ff->descent = cell_height - 1;
 
+  int fontsize[FONT_UNDERLINE + 1];
 #ifdef handle_baseline_leap
   int base_ascent = tm.tmAscent;
 #endif
@@ -656,9 +665,10 @@ win_init_fontfamily(HDC dc, int findex)
       if (SelectObject(dc, ff->fonts[i]) && GetTextMetrics(dc, &tm)) {
         fontsize[i] = tm.tmAveCharWidth + 256 * tm.tmHeight;
         trace_font(("%02X height %d avwidth %d asc %d dsc %d intlead %d extlead %d %ls\n", 
-               i, (int)tm.tmHeight, (int)tm.tmAveCharWidth, (int)tm.tmAscent, (int)tm.tmDescent, 
-               (int)tm.tmInternalLeading, (int)tm.tmExternalLeading, 
-               ff->name));
+                    i, (int)tm.tmHeight, (int)tm.tmAveCharWidth, 
+                    (int)tm.tmAscent, (int)tm.tmDescent, 
+                    (int)tm.tmInternalLeading, (int)tm.tmExternalLeading, 
+                    ff->name));
 #ifdef handle_baseline_leap
         if (i == FONT_BOLD && tm.tmAscent < base_ascent) {
           // for Courier New, this correlates with a significant visual leap 
@@ -698,6 +708,7 @@ win_init_fontfamily(HDC dc, int findex)
       ff->fonts[FONT_BOLD] = 0;
     }
   }
+
   trace_font(("bold_mode %d\n", ff->bold_mode));
   ff->fontflag[FONT_NORMAL] = true;
   ff->fontflag[FONT_BOLD] = true;
@@ -854,52 +865,10 @@ win_zoom_font(int zoom, bool sync_size_with_font)
   win_set_font_size(zoom ? max(1, abs(font_size) + zoom) : 0, sync_size_with_font);
 }
 
+
 static HDC dc;
 static enum { UPDATE_IDLE, UPDATE_BLOCKED, UPDATE_PENDING } update_state;
 static bool ime_open;
-
-void
-win_paint(void)
-{
-  PAINTSTRUCT p;
-  dc = BeginPaint(wnd, &p);
-
-  term_invalidate(
-    (p.rcPaint.left - PADDING) / cell_width,
-    (p.rcPaint.top - PADDING) / cell_height,
-    (p.rcPaint.right - PADDING - 1) / cell_width,
-    (p.rcPaint.bottom - PADDING - 1) / cell_height
-  );
-
-  if (update_state != UPDATE_PENDING) {
-    term_paint();
-    winimg_paint();
-  }
-
-  if (p.fErase || p.rcPaint.left < PADDING ||
-      p.rcPaint.top < PADDING ||
-      p.rcPaint.right >= PADDING + cell_width * term.cols ||
-      p.rcPaint.bottom >= PADDING + cell_height * term.rows) {
-    colour bg_colour = colours[term.rvideo ? FG_COLOUR_I : BG_COLOUR_I];
-    HBRUSH oldbrush = SelectObject(dc, CreateSolidBrush(bg_colour));
-    HPEN oldpen = SelectObject(dc, CreatePen(PS_SOLID, 0, bg_colour));
-
-    IntersectClipRect(dc, p.rcPaint.left, p.rcPaint.top, p.rcPaint.right,
-                      p.rcPaint.bottom);
-
-    ExcludeClipRect(dc, PADDING, PADDING,
-                    PADDING + cell_width * term.cols,
-                    PADDING + cell_height * term.rows);
-
-    Rectangle(dc, p.rcPaint.left, p.rcPaint.top,
-                  p.rcPaint.right, p.rcPaint.bottom);
-
-    DeleteObject(SelectObject(dc, oldbrush));
-    DeleteObject(SelectObject(dc, oldpen));
-  }
-
-  EndPaint(wnd, &p);
-}
 
 #define dont_debug_cursor 1
 
@@ -909,12 +878,14 @@ static struct charnameentry {
 } * charnametable = null;
 static int charnametable_len = 0;
 static int charnametable_alloced = 0;
+static bool charnametable_init = false;
 
 static void
 init_charnametable()
 {
-  if (charnametable)
+  if (charnametable_init)
     return;
+  charnametable_init = true;
 
   void add_charname(uint cc, char * cn) {
     if (charnametable_len >= charnametable_alloced) {
@@ -1015,7 +986,13 @@ show_curchar_info(char tag)
     static char * prev = null;
     if (!prev || 0 != strcmp(cs, prev)) {
       //printf("[%c]%s\n", tag, cs);
-      SetWindowTextA(wnd, cs);
+      if (nonascii(cs)) {
+        wchar * wcs = cs__utftowcs(cs);
+        SetWindowTextW(wnd, wcs);
+        free(wcs);
+      }
+      else
+        SetWindowTextA(wnd, cs);
     }
     if (prev)
       free(prev);
@@ -1023,15 +1000,29 @@ show_curchar_info(char tag)
   }
 
   void show_char_info(termchar * cpoi) {
+    char * cs = 0;
+
     // return if base character same as previous and no combining chars
     if (cpoi == pp && cpoi && cpoi->chr == prev.chr && !cpoi->cc_next)
       return;
 
-    char * cs = strdup("");
+#define dont_debug_emojis
+
+    if (cfg.emojis && (cpoi->attr.attr & TATTR_EMOJI)) {
+      if (cpoi == pp)
+        return;
+      cs = get_emoji_description(cpoi);
+#ifdef debug_emojis
+      printf("Emoji sequence: %s\n", cs);
+#endif
+    }
 
     pp = cpoi;
-    if (cpoi) {
+
+    if (!cs && cpoi) {
       prev = *cpoi;
+
+      cs = strdup("");
 
       char * cn = strdup("");
 
@@ -1153,14 +1144,72 @@ do_update(void)
   win_set_timer(do_update, 16);
 }
 
+#include <math.h>
+
+/*
+   Indicate size of selection with a popup tip (option SelectionShowSize).
+   Future enhancements may be automatic position flipping depending 
+   on selection direction or if the tip reaches outside the screen.
+   Also the actual tip window should better be decoupled from the 
+   window size tip which is now abused for this feature.
+ */
+static void
+sel_update(bool update_sel_tip)
+{
+  static bool selection_tip_active = false;
+  //printf("sel_update tok %d sel %d act %d\n", tip_token, term.selected, selection_tip_active);
+  if (term.selected && cfg.selection_show_size && update_sel_tip) {
+    int cols, rows;
+    if (term.sel_rect) {
+      rows = abs(term.sel_end.y - term.sel_start.y) + 1;
+      cols = abs(term.sel_end.x - term.sel_start.x);
+    }
+    else {
+      rows = term.sel_end.y - term.sel_start.y + 1;
+      if (rows == 1)
+        cols = term.sel_end.x - term.sel_start.x;
+      else
+        cols = term.cols;
+    }
+    RECT wr;
+    GetWindowRect(wnd, &wr);
+    LONG style = GetWindowLong(wnd, GWL_STYLE);
+    int x = wr.left
+          + ((style & WS_THICKFRAME) ? GetSystemMetrics(SM_CXSIZEFRAME) : 0)
+          + PADDING + last_pos.x * cell_width;
+    int y = wr.top
+          + ((style & WS_THICKFRAME) ? GetSystemMetrics(SM_CYSIZEFRAME) : 0)
+          + ((style & WS_CAPTION) ? GetSystemMetrics(SM_CYCAPTION) : 0)
+          + PADDING + last_pos.y * cell_height;
+#ifdef debug_selection_show_size 
+    cfg.selection_show_size = cfg.selection_show_size % 12 + 1;
+#endif
+    int w = 30, h = 18;  // assumed size of tip window
+    float phi = 2 * 3.1415 / 12 * (cfg.selection_show_size + 9);
+    float rx = cell_width * 1.5;
+    float ry = cell_height * 1.5;
+    int dx = cell_width / 2 + rx * cos(phi) - w / 2;
+    int dy = cell_height / 2 + ry * sin(phi) - h / 2;
+    //printf("selection_show_size [%d]: %.2f %.2f %.2f\n", cfg.selection_show_size, phi, cos(phi), sin(phi));
+    win_show_tip(x + dx, y + dy, cols, rows);
+    selection_tip_active = true;
+  }
+  else if (!term.selected && selection_tip_active) {
+    win_destroy_tip();
+    selection_tip_active = false;
+  }
+}
+
 void
-win_update(void)
+win_update(bool update_sel_tip)
 {
   trace_resize(("----- win_update\n"));
   if (update_state == UPDATE_IDLE)
     do_update();
   else
     update_state = UPDATE_PENDING;
+
+  sel_update(update_sel_tip);
 }
 
 void
@@ -1232,10 +1281,731 @@ win_set_ime_open(bool open)
   if (open != ime_open) {
     ime_open = open;
     term.cursor_invalid = true;
-    win_update();
+    win_update(false);
   }
 }
 
+
+/*
+   Background texture/image.
+ */
+
+static bool tiled = false;
+static bool ratio = false;
+static bool wallp = false;
+static int wallp_style;
+static int alpha = -1;
+static LONG w = 0, h = 0;
+static HBRUSH bgbrush_bmp = 0;
+
+static BOOL (WINAPI *pAlphaBlend)(HDC, int, int, int, int, HDC, int, int, int, int, BLENDFUNCTION) = 0;
+
+static HBITMAP
+alpha_blend_bg(int alpha, HDC dc, HBITMAP hbm, int bw, int bh, colour bg)
+{
+  // load GDI function
+  if (!pAlphaBlend) {
+    pAlphaBlend = load_library_func("msimg32.dll", "AlphaBlend");
+  }
+  if (!pAlphaBlend)
+    return hbm;
+
+  // take size from hbm if not passed explicitly
+  if (!bw || !bh) {
+    BITMAP bm0;
+    if (!GetObject(hbm, sizeof(BITMAP), &bm0))
+      return hbm;
+    bw = bm0.bmWidth;
+    bh = bm0.bmHeight;
+  }
+
+  // prepare source memory DC and select the source bitmap into it
+  HDC dc0 = CreateCompatibleDC(dc);
+  HBITMAP oldhbm0 = SelectObject(dc0, hbm);
+
+  // prepare destination memory DC, 
+  // create and select the destination bitmap into it
+  HDC dc1 = CreateCompatibleDC(dc);
+  HBITMAP hbm1 = CreateCompatibleBitmap(dc0, bw, bh);
+  HBITMAP oldhbm1 = SelectObject(dc1, hbm1);
+
+  HBRUSH bgb = CreateSolidBrush(bg);
+  FillRect(dc1, &(RECT){0, 0, bw, bh}, bgb);
+  DeleteObject(bgb);
+
+  BYTE alphafmt = alpha == 255 ? AC_SRC_ALPHA : 0;
+  BLENDFUNCTION bf = (BLENDFUNCTION) {AC_SRC_OVER, 0, alpha, alphafmt};
+  int ok = pAlphaBlend(dc1, 0, 0, bw, bh, dc0, 0, 0, bw, bh, bf);
+
+  // release everything
+  SelectObject(dc1, oldhbm1);
+  SelectObject(dc0, oldhbm0);
+  DeleteDC(dc1);
+  DeleteDC(dc0);
+
+  if (ok) {
+    DeleteObject(hbm);
+    return hbm1;
+  }
+  else
+    return hbm;
+}
+
+static void
+offset_bg(HDC dc)
+{
+  RECT wr;
+  GetWindowRect(wnd, &wr);
+  int wx = wr.left + GetSystemMetrics(SM_CXSIZEFRAME);
+  int wy = wr.top + GetSystemMetrics(SM_CYSIZEFRAME) + GetSystemMetrics(SM_CYCAPTION);
+
+  // adjust wallpaper origin
+
+  SetBrushOrgEx(dc, -wx, -wy, 0);
+}
+
+#if CYGWIN_VERSION_API_MINOR >= 74
+
+#include <w32api/wtypes.h>
+#include <w32api/gdiplus/gdiplus.h>
+#include <w32api/gdiplus/gdiplusflat.h>
+
+static GpBrush * bgbrush_img = 0;
+static GpGraphics * bg_graphics = 0;
+
+#define dont_debug_gdiplus
+
+#ifdef debug_gdiplus
+static void
+gpcheck(char * tag, GpStatus s)
+{
+  static char * gps[] = {
+    "Ok",
+    "GenericError",
+    "InvalidParameter",
+    "OutOfMemory",
+    "ObjectBusy",
+    "InsufficientBuffer",
+    "NotImplemented",
+    "Win32Error",
+    "WrongState",
+    "Aborted",
+    "FileNotFound",
+    "ValueOverflow",
+    "AccessDenied",
+    "UnknownImageFormat",
+    "FontFamilyNotFound",
+    "FontStyleNotFound",
+    "NotTrueTypeFont",
+    "UnsupportedGdiplusVersion",
+    "GdiplusNotInitialized",
+    "PropertyNotFound",
+    "PropertyNotSupported",
+    "ProfileNotFound",
+  };
+  if (s)
+    printf("[%s] %d %s\n", tag, s, s >= 0 && s < lengthof(gps) ? gps[s] : "?");
+}
+#else
+#define gpcheck(tag, s)	(void)s
+#endif
+
+static void
+drop_background_image_brush(void)
+{
+  if (bgbrush_img) {
+    GpStatus s = GdipDeleteBrush(bgbrush_img);
+    gpcheck("delete brush", s);
+    bgbrush_img = 0;
+  }
+}
+
+static void
+init_gdiplus(void)
+{
+  static GdiplusStartupInput gi = (GdiplusStartupInput){1, NULL, FALSE, FALSE};
+  static ULONG_PTR gis = 0;
+  if (!gis) {
+    GpStatus s = GdiplusStartup(&gis, &gi, NULL);
+    gpcheck("startup", s);
+  }
+}
+
+static bool
+get_image_size(wstring fn, uint * _bw, uint * _bh)
+{
+  GpStatus s;
+
+  init_gdiplus();
+
+  GpBitmap * gbm = 0;
+  s = GdipCreateBitmapFromFile(fn, &gbm);
+  gpcheck("bitmap from file", s);
+  if (s != Ok || !gbm)
+    return false;
+
+  GpStatus stsz = GdipGetImageWidth(gbm, _bw);
+  gpcheck("get size", stsz);
+  if (stsz == Ok) {
+    stsz = GdipGetImageHeight(gbm, _bh);
+    gpcheck("get size", stsz);
+  }
+
+  s = GdipDisposeImage(gbm);
+  gpcheck("dispose bitmap", s);
+
+  if (stsz != Ok) {
+    HBITMAP hbm = 0;
+    s = GdipCreateHBITMAPFromBitmap(gbm, &hbm, 0);
+    gpcheck("convert bitmap", s);
+
+    BITMAP bm0;
+    if (!GetObject(hbm, sizeof(BITMAP), &bm0))
+      return false;
+    *_bw = bm0.bmWidth;
+    *_bh = bm0.bmHeight;
+    DeleteObject(hbm);
+  }
+  return true;
+}
+
+static void
+load_background_image_brush(HDC dc, wstring fn)
+{
+  GpStatus s;
+
+  init_gdiplus();
+
+  drop_background_image_brush();
+
+  // try to provide a GDI brush from a GDI+ image
+  // (because a GDI brush is much more efficient than a GDI+ brush)
+  GpBitmap * gbm = 0;
+  s = GdipCreateBitmapFromFile(fn, &gbm);
+  gpcheck("bitmap from file", s);
+
+  if (s == Ok && gbm) {
+    HBITMAP hbm = 0;
+    s = GdipCreateHBITMAPFromBitmap(gbm, &hbm, 0);
+    gpcheck("convert bitmap", s);
+
+    if (!tiled) {
+      // scale the bitmap; 
+      // wtf is this a complex task @ braindamaged Windows API
+      // https://www.experts-exchange.com/questions/28594399/Whats-the-best-way-to-scale-a-windows-bitmap.html
+
+      uint bw, bh;
+      GpStatus stsz = GdipGetImageWidth(gbm, &bw);
+      gpcheck("get size", stsz);
+      if (stsz == Ok) {
+        stsz = GdipGetImageHeight(gbm, &bh);
+        gpcheck("get size", stsz);
+      }
+
+      s = GdipDisposeImage(gbm);
+      gpcheck("dispose bitmap", s);
+      gbm = 0;
+
+      if (stsz != Ok) {
+        BITMAP bm0;
+        if (!GetObject(hbm, sizeof(BITMAP), &bm0))
+          return;
+        bw = bm0.bmWidth;
+        bh = bm0.bmHeight;
+      }
+
+#ifdef scale_to_aspect_ratio_asynchronously
+      // keep aspect ratio of background image if requested
+      static wchar * prevbg = 0;
+      bool isnewbg = !prevbg || wcscmp(cfg.background, prevbg);
+      printf("isnewbg %d <%ls> <%ls>\n", isnewbg, cfg.background, prevbg);
+      if (ratio && isnewbg && abs(bw * h - bh * w) > 5) {
+        if (prevbg)
+          free(prevbg);
+        prevbg = wcsdup(cfg.background);
+
+        int xh, xw;
+        if (bw * h < bh * w) {
+          xh = h;
+          xw = bw * xh / bh;
+        } else {
+          xw = w;
+          xh = bh * xw / bw;
+        }
+        int sy = win_search_visible() ? SEARCHBAR_HEIGHT : 0;
+        printf("%dx%d (%dx%d) -> %dx%d\n", (int)h, (int)w, bh, bw, xh, xw);
+        // rescale window to aspect ratio of background image
+        win_set_pixels(xh - 2 * PADDING - sy, xw - 2 * PADDING);
+        // WARNING: rescaling asynchronously at this point makes 
+        // terminal geometry (term.rows, term.cols) inconsistent with 
+        // running operations and may crash mintty; 
+        // postponing the resizing with SendMessage does not help;
+        // therefore try to update mintty data now; 
+        // this seems to help a bit, but not completely;
+        // that's why this embedded approach is disabled
+        do_update();
+        w = xw;
+        h = xh;
+      }
+#endif
+
+      // prepare source memory DC and select the source bitmap into it
+      HDC dc0 = CreateCompatibleDC(dc);
+      HBITMAP oldhbm0 = SelectObject(dc0, hbm);
+
+      // prepare destination memory DC, 
+      // create and select the destination bitmap into it
+      HDC dc1 = CreateCompatibleDC(dc);
+      HBITMAP hbm1 = CreateCompatibleBitmap(dc0, w, h);
+      HBITMAP oldhbm1 = SelectObject(dc1, hbm1);
+
+      if (alpha >= 0 && !pAlphaBlend) {
+        pAlphaBlend = load_library_func("msimg32.dll", "AlphaBlend");
+      }
+
+      if (alpha < 0 || !pAlphaBlend) {
+        // set half-tone stretch-blit mode for scaling quality
+        SetStretchBltMode(dc1, HALFTONE);
+        // draw the bitmap scaled into the destination memory DC
+        StretchBlt(dc1, 0, 0, w, h, dc0, 0, 0, bw, bh, SRCCOPY);
+
+        DeleteObject(hbm);
+        hbm = hbm1;
+      }
+      else {
+#ifdef fill_bg_with_rectangle
+#warning missing border HPEN
+        HBRUSH oldbrush = SelectObject(dc1, CreateSolidBrush(win_get_colour(BG_COLOUR_I)));
+        Rectangle(dc1, 0, 0, w, h);
+        DeleteObject(SelectObject(dc1, oldbrush));
+#else
+        HBRUSH br = CreateSolidBrush(win_get_colour(BG_COLOUR_I));
+        FillRect(dc1, &(RECT){0, 0, w, h}, br);
+        DeleteObject(br);
+#endif
+
+        BYTE alphafmt = alpha == 255 ? AC_SRC_ALPHA : 0;
+        BLENDFUNCTION bf = (BLENDFUNCTION) {AC_SRC_OVER, 0, alpha, alphafmt};
+        if (pAlphaBlend(dc1, 0, 0, w, h, dc0, 0, 0, bw, bh, bf)) {
+          DeleteObject(hbm);
+          hbm = hbm1;
+        }
+      }
+
+      // release everything
+      SelectObject(dc1, oldhbm1);
+      SelectObject(dc0, oldhbm0);
+      DeleteDC(dc1);
+      DeleteDC(dc0);
+    }
+    else {  // tiled
+      if (alpha >= 0) {
+        uint bw = 0, bh = 0;
+        s = GdipGetImageWidth(gbm, &bw);
+        gpcheck("get size", s);
+        s = GdipGetImageHeight(gbm, &bh);
+        gpcheck("get size", s);
+        hbm = alpha_blend_bg(alpha, dc, hbm, bw, bh, win_get_colour(BG_COLOUR_I));
+      }
+
+      s = GdipDisposeImage(gbm);
+      gpcheck("dispose bitmap", s);
+      gbm = 0;
+    }
+
+    // now we have the (scaled or to-be-tiled) bitmap in 'hbm'
+    if (hbm) {
+      bgbrush_bmp = CreatePatternBrush(hbm);
+      DeleteObject(hbm);
+      if (bgbrush_bmp) {
+        RECT cr;
+        GetClientRect(wnd, &cr);
+
+        /* By applying this tweak here and (!) in fill_background below,
+           we can apply an offset to the origin of a wallpaper background, 
+           in order to simulate a floating window.
+         */
+        if (wallp) {
+          offset_bg(dc);
+        }
+
+        FillRect(dc, &cr, bgbrush_bmp);
+        drop_background_image_brush();
+        return;
+      }
+    }
+  }
+
+#ifdef use_gdiplus_brush_fallback
+  DWORD win_version = GetVersion();
+  win_version = ((win_version & 0xff) << 8) | ((win_version >> 8) & 0xff);
+  if (win_version > 0x0601)  // not Windows 7 or XP
+    return;
+
+  // creating a GDI brush failed,
+  // try to provide a GDI+ brush (does not work on Windows 10)
+  GpImage * img = 0;
+  s = GdipLoadImageFromFile(fn, &img);
+  gpcheck("load image", s);
+
+  GpTexture * gt = 0;
+  s = GdipCreateTexture(img, WrapModeTile, &gt);
+  gpcheck("texture", s);
+  if (!tiled) {
+    uint iw, ih;
+    s = GdipGetImageWidth(img, &iw);
+    gpcheck("width", s);
+    s = GdipGetImageHeight(img, &ih);
+    gpcheck("height", s);
+    s = GdipScaleTextureTransform(gt, (float)w / iw, (float)h / ih, 0);
+    gpcheck("scale", s);
+  }
+  s = GdipDisposeImage(img);
+  gpcheck("dispose img", s);
+
+  bgbrush_img = gt;
+#endif
+}
+
+static bool
+fill_rect(HDC dc, RECT * boxp, GpBrush * br)
+{
+  GpStatus s, sbrush = -1;
+#ifdef debug_gdiplus
+  static int nfills = 0;
+  nfills ++;
+#endif
+
+  void fill(void)
+  {
+    sbrush = GdipFillRectangleI(bg_graphics, br, boxp->left, boxp->top, boxp->right - boxp->left, boxp->bottom - boxp->top);
+    gpcheck("fill", sbrush);
+  }
+
+  if (bg_graphics) {
+    fill();
+  }
+  if (sbrush != Ok) {
+    if (bg_graphics) {
+      s = GdipDeleteGraphics(bg_graphics);
+      gpcheck("delete graphics", s);
+      bg_graphics = 0;
+    }
+#ifdef debug_gdiplus
+    printf("creating graphics, failure rate 1/%d\n", nfills);
+    nfills = 0;
+#endif
+    s = GdipCreateFromHDC(dc, &bg_graphics);
+    gpcheck("create graphics", s);
+    fill();
+  }
+
+  return sbrush == Ok;
+}
+
+#endif
+
+void
+win_flush_background(bool clearbg)
+{
+#ifdef debug_gdiplus
+  printf("flush background bmp %d img %d gr %d (tiled %d)\n", !!bgbrush_bmp, !!bgbrush_img, !!bg_graphics, tiled);
+#endif
+  w = 0; h = 0;
+  tiled = false;
+  if (clearbg) {
+    alpha = -1;
+    // TODO: save redundant image reloading (and brush creation)
+  }
+
+  if (bgbrush_bmp) {
+    DeleteObject(bgbrush_bmp);
+    bgbrush_bmp = 0;
+  }
+#if CYGWIN_VERSION_API_MINOR >= 74
+  drop_background_image_brush();
+  GpStatus s;
+  if (bg_graphics) {
+    s = GdipDeleteGraphics(bg_graphics);
+    bg_graphics = 0;
+    gpcheck("delete graphics", s);
+  }
+#endif
+}
+
+/*
+   Return background image filename in malloced string.
+ */
+static wchar *
+get_bg_filename(void)
+{
+  tiled = false;
+  ratio = false;
+  wallp = false;
+  static wchar * wallpfn = 0;
+
+  wchar * bgfn = (wchar *)cfg.background;
+  if (*bgfn == '*') {
+    tiled = true;
+    bgfn++;
+  }
+  else if (*bgfn == '%') {
+    ratio = true;
+    bgfn++;
+  }
+  else if (*bgfn == '_') {
+    bgfn++;
+  }
+#if CYGWIN_VERSION_API_MINOR >= 74
+  else if (*bgfn == '=') {
+    wallp = true;
+
+    if (!wallpfn)
+      wallpfn = newn(wchar, MAX_PATH + 1);
+
+    void readregstr(HKEY key, wstring attribute, wchar * val, DWORD len) {
+      DWORD type;
+      int err = RegQueryValueExW(key, attribute, 0, &type, (void *)val, &len);
+      if (err ||
+          !(type == REG_SZ || type == REG_EXPAND_SZ || type == REG_MULTI_SZ))
+        *val = 0;
+    }
+
+    HKEY wpk = 0;
+    RegOpenKeyA(HKEY_CURRENT_USER, "Control Panel\\Desktop", &wpk);
+    if (wpk) {
+      readregstr(wpk, W("Wallpaper"), wallpfn, MAX_PATH);
+      wchar regval[22];
+      readregstr(wpk, W("TileWallpaper"), regval, lengthof(regval));
+      tiled = 0 == wcscmp(regval, W("1"));
+      readregstr(wpk, W("WallpaperStyle"), regval, lengthof(regval));
+      wallp_style = wcstol(regval, 0, 0);
+      //printf("wallpaper <%ls> tiled %d style %d\n", wallpfn, tiled, wallp_style);
+
+      if (tiled && !wallp_style) {
+        // can be used as brush directly
+      }
+      else {
+        // need to scale wallpaper later, when loading;
+        /// not implemented, invalidate
+        *wallpfn = 0;
+        // possibly, according to docs, but apparently ignored, 
+        // also determine origin according to
+        // readregstr(wpk, W("WallpaperOriginX"), ...)
+        // readregstr(wpk, W("WallpaperOriginY"), ...)
+      }
+      RegCloseKey(wpk);
+    }
+  }
+#else
+  (void)wallp_style;
+#endif
+
+  char * bf = cs__wcstombs(bgfn);
+  // try to extract an alpha value from file spec
+  char * salpha = strrchr(bf, ',');
+  if (salpha) {
+    *salpha = 0;
+    salpha++;
+    if (sscanf(salpha, "%u%c", &alpha, &(char){0}) != 1)
+      alpha = -1;
+  }
+
+  if (wallp)
+    bgfn = wcsdup(wallpfn);
+  else {
+    // path transformations
+    if (0 == strncmp("~/", bf, 2)) {
+      char * bfexp = asform("%s/%s", home, bf + 2);
+      free(bf);
+      bf = bfexp;
+    }
+    else if (*bf != '/' && !(*bf && bf[1] == ':')) {
+      char * fgd = foreground_cwd();
+      if (fgd) {
+        char * bfexp = asform("%s/%s", fgd, bf);
+        free(bf);
+        bf = bfexp;
+      }
+    }
+
+    if (support_wsl && !wallp) {
+      wchar * wbf = cs__utftowcs(bf);
+      wchar * wdewbf = dewsl(wbf);  // free(wbf)
+      char * dewbf = cs__wcstoutf(wdewbf);
+      free(wdewbf);
+      free(bf);
+      bf = dewbf;
+    }
+
+    bgfn = path_posix_to_win_w(bf);
+  }
+
+#ifdef debug_gdiplus
+  printf("loading brush <%ls> <%s> <%ls>\n", cfg.background, bf, bgfn);
+#endif
+  free(bf);
+  return bgfn;
+}
+
+static void
+load_background_brush(HDC dc)
+{
+  // we could try to hook into win_adapt_term_size to update the full 
+  // screen background and reload the background on demand, 
+  // but let's rather handle this autonomously here
+  RECT cr;
+  GetClientRect(wnd, &cr);
+  if (cr.right - cr.left == w && cr.bottom - cr.top == h)
+    return;  // keep brush
+
+  if (tiled)
+    return;  // do not scale tiled brush
+
+  // remember terminal screen size
+  w = cr.right - cr.left;
+  h = cr.bottom - cr.top;
+
+  // adjust paint screen size
+  if (win_search_visible())
+    cr.bottom -= SEARCHBAR_HEIGHT;
+
+  wchar * bgfn = get_bg_filename();  // also set tiled and alpha
+
+  HBITMAP
+  load_background_bitmap(wstring fn)
+  {
+    HBITMAP bm = 0;
+    wstring bmpsuf = wcscasestr(fn, W(".bmp"));
+    if (bmpsuf && wcslen(bmpsuf) == 4) {
+      if (tiled)
+        bm = (HBITMAP) LoadImageW(0, fn,
+                                  IMAGE_BITMAP, 0, 0,
+                                  LR_DEFAULTSIZE |
+                                  LR_LOADFROMFILE);
+      else
+        bm = (HBITMAP) LoadImageW(0, fn,
+                                  IMAGE_BITMAP, w, h,
+                                  LR_LOADFROMFILE);
+    }
+
+    if (bm && alpha >= 0) {
+      if (tiled)
+        bm = alpha_blend_bg(alpha, dc, bm, 0, 0, win_get_colour(BG_COLOUR_I));
+      else
+        bm = alpha_blend_bg(alpha, dc, bm, w, h, win_get_colour(BG_COLOUR_I));
+    }
+
+    return bm;
+  }
+
+  if (!bgbrush_bmp) {
+    HBITMAP bm = load_background_bitmap(bgfn);
+    if (bm) {
+      bgbrush_bmp = CreatePatternBrush(bm);
+      DeleteObject(bm);
+      if (bgbrush_bmp) {
+        FillRect(dc, &cr, bgbrush_bmp);
+      }
+    }
+  }
+
+  if (!bgbrush_bmp) {
+#if CYGWIN_VERSION_API_MINOR >= 74
+    load_background_image_brush(dc, bgfn);
+    // can have set bgbrush_img or bgbrush_bmp
+    if (bgbrush_img)
+      fill_rect(dc, &cr, bgbrush_img);
+    // flag failure to load background?
+    // this is now detected in win_paint by checking the brushes
+    //else if (!bgbrush_bmp)
+#endif
+    //  // trigger proper win_paint behaviour
+    //  wstrset(&cfg.background, W(""));  // not the right approach (zooming)
+  }
+#ifdef debug_gdiplus
+  printf("loaded brush <%ls>: GDI %d GDI+ %d (tiled %d)\n", bgfn, !!bgbrush_bmp, !!bgbrush_img, tiled);
+#endif
+
+  free(bgfn);
+}
+
+static bool
+fill_background(HDC dc, RECT * boxp)
+{
+  load_background_brush(dc);
+  if (wallp) {
+    offset_bg(dc);
+  }
+
+  return
+    (bgbrush_bmp && FillRect(dc, boxp, bgbrush_bmp))
+#if CYGWIN_VERSION_API_MINOR >= 74
+    || (bgbrush_img && fill_rect(dc, boxp, bgbrush_img))
+#endif
+    ;
+}
+
+#define dont_debug_aspect_ratio
+
+void
+scale_to_image_ratio()
+{
+#if CYGWIN_VERSION_API_MINOR >= 74
+  if (*cfg.background != '%')
+    return;
+  wchar * bgfn = get_bg_filename();
+#ifdef debug_aspect_ratio
+  printf("scale_to_image_ratio <%ls> ratio %d\n", bgfn, ratio);
+#endif
+  if (!ratio)
+    return;
+
+  uint bw, bh;
+  int res = get_image_size(bgfn, &bw, &bh);
+  free(bgfn);
+  if (!res || !bw || !bh)
+    return;
+
+  RECT cr;
+  GetClientRect(wnd, &cr);
+  // remember terminal screen size
+  int w = cr.right - cr.left;
+  int h = cr.bottom - cr.top;
+#ifdef debug_aspect_ratio
+  printf("  cur w %d h %d img bw %d bh %d\n", (int)w, (int)h, bw, bh);
+#endif
+
+  if (abs(bw * h - bh * w) < w + h)
+    return;
+
+  w = max(w, ini_width);
+  h = max(h, ini_height);
+#ifdef debug_aspect_ratio
+  printf("  max w %d h %d\n", (int)w, (int)h);
+#endif
+
+  int xh, xw;
+  if (bw * h < bh * w) {
+    xh = h;
+    xw = bw * xh / bh;
+  } else {
+    xw = w;
+    xh = bh * xw / bw;
+  }
+  int sy = win_search_visible() ? SEARCHBAR_HEIGHT : 0;
+#ifdef debug_aspect_ratio
+  printf("  %dx%d (%dx%d) -> %dx%d\n", (int)w, (int)h, bw, bh, xw, xh);
+#endif
+  // rescale window to aspect ratio of background image
+  win_set_pixels(xh - 2 * PADDING - sy, xw - 2 * PADDING);
+#endif
+}
+
+
+/*
+   Text output.
+ */
 
 #define dont_debug_win_text
 
@@ -1688,7 +2458,7 @@ apply_attr_colour(cattr a, attr_colour_mode mode)
  * We are allowed to fiddle with the contents of `text'.
  */
 void
-win_text(int x, int y, wchar *text, int len, cattr attr, cattr *textattr, ushort lattr, bool has_rtl)
+win_text(int tx, int ty, wchar *text, int len, cattr attr, cattr *textattr, ushort lattr, bool has_rtl)
 {
   int graph = (attr.attr >> ATTR_GRAPH_SHIFT) & 0xFF;
   int findex = (attr.attr & FONTFAM_MASK) >> ATTR_FONTFAM_SHIFT;
@@ -1705,16 +2475,19 @@ win_text(int x, int y, wchar *text, int len, cattr attr, cattr *textattr, ushort
 
  /* Only want the left half of double width lines */
   // check this before scaling up x to pixels!
-  if (lattr != LATTR_NORM && x * 2 >= term.cols)
+  if (lattr != LATTR_NORM && tx * 2 >= term.cols)
     return;
 
  /* Convert to window coordinates */
-  x = x * char_width + PADDING;
-  y = y * cell_height + PADDING;
+  int x = tx * char_width + PADDING;
+  int y = ty * cell_height + PADDING;
 
   if (attr.attr & ATTR_WIDE)
     char_width *= 2;
 
+  bool default_bg = (attr.attr & ATTR_BGMASK) >> ATTR_BGSHIFT == BG_COLOUR_I;
+  if (attr.attr & ATTR_REVERSE)
+    default_bg = false;
   attr = apply_attr_colour(attr, ACM_TERM);
   colour fg = attr.truefg;
   colour bg = attr.truebg;
@@ -1723,16 +2496,28 @@ win_text(int x, int y, wchar *text, int len, cattr attr, cattr *textattr, ushort
   bool has_cursor = attr.attr & (TATTR_ACTCURS | TATTR_PASCURS);
   colour cursor_colour = 0;
 
+#ifdef keep_sel_colour_here
+  if ((attr.attr & ATTR_BGMASK) >> ATTR_BGSHIFT == SEL_COLOUR_I)
+#else
+  if (attr.attr & TATTR_SELECTED)
+#endif
+    default_bg = false;
+
   if (attr.attr & (TATTR_CURRESULT | TATTR_CURMARKED)) {
     bg = cfg.search_current_colour;
     fg = cfg.search_fg_colour;
+    default_bg = false;
   }
   else if (attr.attr & (TATTR_RESULT | TATTR_MARKED)) {
     bg = cfg.search_bg_colour;
     fg = cfg.search_fg_colour;
+    default_bg = false;
   }
 
   if (has_cursor) {
+    if (term_cursor_type() == CUR_BLOCK && (attr.attr & TATTR_ACTCURS))
+      default_bg = false;
+
     cursor_colour = colours[ime_open ? IME_CURSOR_COLOUR_I : CURSOR_COLOUR_I];
 
     //static uint mindist = 32768;
@@ -1783,12 +2568,14 @@ win_text(int x, int y, wchar *text, int len, cattr attr, cattr *textattr, ushort
   }
   if (ff->bold_mode == BOLD_FONT && (attr.attr & ATTR_BOLD))
     nfont |= FONT_BOLD;
-  if (ff->und_mode == UND_FONT && (attr.attr & ATTR_UNDER))
+  if (ff->und_mode == UND_FONT && (attr.attr & UNDER_MASK) == ATTR_UNDER
+      && !(attr.attr & ATTR_ULCOLOUR))
     nfont |= FONT_UNDERLINE;
   if (attr.attr & ATTR_ITALIC)
     nfont |= FONT_ITALIC;
   if (attr.attr & ATTR_STRIKEOUT
-      && !cfg.underl_manual && cfg.underl_colour == (colour)-1)
+      && !cfg.underl_manual && cfg.underl_colour == (colour)-1
+      && !(attr.attr & ATTR_ULCOLOUR))
     nfont |= FONT_STRIKEOUT;
   if (attr.attr & TATTR_ZOOMFULL)
     nfont |= FONT_ZOOMFULL;
@@ -1852,6 +2639,7 @@ win_text(int x, int y, wchar *text, int len, cattr attr, cattr *textattr, ushort
     };
 
     trace_line(" <ChrPlc:");
+    // This does not work for non-BMP:
     GetCharacterPlacementW(dc, text, len, 0, &gcpr,
                            FLI_MASK | GCP_CLASSIN | GCP_DIACRITIC);
     len = gcpr.nGlyphs;
@@ -1878,7 +2666,7 @@ win_text(int x, int y, wchar *text, int len, cattr attr, cattr *textattr, ushort
     }
   }
 
-  if (graph && !(graph & 0x80)) {
+  if (graph && graph < 0xE0) {
     for (int i = 0; i < len; i++)
       text[i] = ' ';
   }
@@ -1887,7 +2675,7 @@ win_text(int x, int y, wchar *text, int len, cattr attr, cattr *textattr, ushort
   int dxs[len];
   int dx = combining ? 0 : char_width;
   for (int i = 0; i < len; i++) {
-    if (is_low_surrogate(text[i]))
+    if (is_high_surrogate(text[i]))
       // This does not have the expected effect so we keep splitting up 
       // non-BMP characters into single character chunks for now (term.c)
       dxs[i] = 0;
@@ -1976,7 +2764,9 @@ win_text(int x, int y, wchar *text, int len, cattr attr, cattr *textattr, ushort
   if (uloff >= cell_height)
     uloff = cell_height - 1;
 
-  if (cfg.underl_colour != (colour)-1)
+  if (attr.attr & ATTR_ULCOLOUR)
+    ul = attr.ulcolr;
+  else if (cfg.underl_colour != (colour)-1)
     ul = cfg.underl_colour;
 #ifdef debug_underline
   if (cfg.underl_colour == (colour)-1)
@@ -2004,6 +2794,27 @@ win_text(int x, int y, wchar *text, int len, cattr attr, cattr *textattr, ushort
 
       underlaid = true;
     }
+  }
+
+ /* Graphic background: picture or texture */
+  if (*cfg.background && default_bg) {
+    RECT bgbox = box0;
+    if (!tx)
+      bgbox.left = 0;
+    if (bgbox.right >= PADDING + cell_width * term.cols)
+      bgbox.right += PADDING;
+    if (!ty)
+      bgbox.top = 0;
+    if (ty == term.rows - 1) {
+      RECT cr;
+      GetClientRect(wnd, &cr);
+      if (win_search_visible())
+        cr.bottom -= SEARCHBAR_HEIGHT;
+      bgbox.bottom = cr.bottom;
+    }
+
+    if (fill_background(dc, &bgbox))
+      underlaid = true;
   }
 
  /* Special underlay */
@@ -2048,16 +2859,51 @@ win_text(int x, int y, wchar *text, int len, cattr attr, cattr *textattr, ushort
     underlaid = true;
   }
 
+ /* Special underline */
+  if (!ldisp2 && lattr != LATTR_TOP &&
+      (attr.attr & UNDER_MASK) == ATTR_CURLYUND) {
+    clear_run();
+
+    int step = 4;  // horizontal step width
+    int delta = 3; // vertical phase height
+    int offset = 1; // offset up from uloff
+    int rep = (ulen * char_width - 1) / step + 1;
+    POINT bezier[1 + rep * 3];
+    for (int i = 0; i <= rep * 3; i++) {
+      bezier[i].x = x + i * step;
+      int wave = (i % 3 == 2) ? delta : (i % 3 == 1) ? -delta : 0;
+      bezier[i].y = y + uloff - offset + wave;
+    }
+    HPEN oldpen = SelectObject(dc, CreatePen(PS_SOLID, 0, ul));
+    for (int l = 0; l < line_width; l++) {
+      if (l)
+        for (int i = 0; i <= rep * 3; i++)
+          bezier[i].y--;
+      PolyBezier(dc, (const POINT *)bezier, 1 + rep * 3);
+    }
+    oldpen = SelectObject(dc, oldpen);
+    DeleteObject(oldpen);
+  }
+  else
+
  /* Underline */
   if (!ldisp2 && lattr != LATTR_TOP &&
       (force_manual_underline ||
-       (ff->und_mode == UND_LINE && (attr.attr & ATTR_UNDER)) ||
-       (attr.attr & ATTR_DOUBLYUND))) {
+       (attr.attr & (ATTR_DOUBLYUND | ATTR_BROKENUND)) ||
+       ((attr.attr & UNDER_MASK) == ATTR_UNDER &&
+        (ff->und_mode == UND_LINE || (attr.attr & ATTR_ULCOLOUR)))
+      )
+     ) {
     clear_run();
 
-    HPEN oldpen = SelectObject(dc, CreatePen(PS_SOLID, 0, ul));
+    int penstyle = (attr.attr & ATTR_BROKENUND)
+                   ? (attr.attr & ATTR_DOUBLYUND)
+                     ? PS_DASH
+                     : PS_DOT
+                   : PS_SOLID;
+    HPEN oldpen = SelectObject(dc, CreatePen(penstyle, 0, ul));
     int gapfrom = 0, gapdone = 0;
-    if (attr.attr & ATTR_DOUBLYUND) {
+    if ((attr.attr & UNDER_MASK) == ATTR_DOUBLYUND) {
       if (line_width < 3)
         line_width = 3;
       int gap = line_width / 3;
@@ -2095,15 +2941,15 @@ win_text(int x, int y, wchar *text, int len, cattr attr, cattr *textattr, ushort
   }
 
  /* DEC Tech adjustments */
-  if (graph & 0x80) {  // DEC Technical rendering to be fixed
-    if ((graph & ~1) == 0x88)  // left square bracket corners
+  if (graph >= 0xE0) {  // DEC Technical rendering to be fixed
+    if ((graph & ~1) == 0xE8)  // left square bracket corners
       xt += line_width + 1;
-    else if ((graph & ~1) == 0x8A)  // right square bracket corners
+    else if ((graph & ~1) == 0xEA)  // right square bracket corners
       xt -= line_width + 1;
-    else if (graph == 0x87)  // middle angle: don't display ╳, draw (below)
+    else if (graph == 0xE7)  // middle angle: don't display ╳, draw (below)
       for (int i = 0; i < len; i++)
         text[i] = ' ';
-    else if (graph == 0x80)  // square root base: rather draw (partially)
+    else if (graph == 0xE0)  // square root base: rather draw (partially)
       for (int i = 0; i < len; i++)
         text[i] = 0x2502;
   }
@@ -2202,7 +3048,7 @@ win_text(int x, int y, wchar *text, int len, cattr attr, cattr *textattr, ushort
 #define DRAW_DOWN  0x4
 #endif
 
-  if (graph & 0x80) {  // DEC Technical characters to be fixed
+  if (graph >= 0xE0) {  // DEC Technical characters to be fixed
     if (graph & 0x08) {
       // square bracket corners already repositioned above
     }
@@ -2232,11 +3078,11 @@ win_text(int x, int y, wchar *text, int len, cattr attr, cattr *textattr, ushort
       }
       int xl = x + xoff;
       int xr = xl;
-      if (graph <= 0x82) {  // diagonals
+      if (graph <= 0xE2) {  // diagonals
         sum_width ++;
         xl += line_width - 1;
         xr = x + char_width - 1;
-        if (graph == 0x82) {
+        if (graph == 0xE2) {
           int xb = xl;
           xl = xr;
           xr = xb;
@@ -2253,10 +3099,10 @@ win_text(int x, int y, wchar *text, int len, cattr attr, cattr *textattr, ushort
         yb -= 1;
       }
       // special adjustments:
-      if (graph == 0x80) {  // square root base
+      if (graph == 0xE0) {  // square root base
         xl --;
       }
-      else if (graph == 0x87) {  // sum middle right angle
+      else if (graph == 0xE7) {  // sum middle right angle
       }
       // draw:
       //HPEN oldpen = SelectObject(dc, CreatePen(PS_SOLID, sum_width, fg));
@@ -2264,12 +3110,12 @@ win_text(int x, int y, wchar *text, int len, cattr attr, cattr *textattr, ushort
       sum_width = 1;  // now handled by pen width
       for (int i = 0; i < len; i++) {
         for (int l = 0; l < sum_width; l++) {
-          if (graph == 0x80) {  // square root base
+          if (graph == 0xE0) {  // square root base
             MoveToEx(dc, xl + l, ycellb, null);
             LineTo(dc, xl - (xl - x0) / 2 + l, yb + l);
             LineTo(dc, x0, yb + l);
           }
-          else if (graph == 0x87) {  // sum middle right angle
+          else if (graph == 0xE7) {  // sum middle right angle
             MoveToEx(dc, x0 + l, y0, null);
             LineTo(dc, xl + l, yt);
             LineTo(dc, x0 + l, yb);
@@ -2285,6 +3131,142 @@ win_text(int x, int y, wchar *text, int len, cattr attr, cattr *textattr, ushort
       }
       oldpen = SelectObject(dc, oldpen);
       DeleteObject(oldpen);
+    }
+  }
+  else if (graph >= 0x80) {  // Unicode Block Elements
+    // Block Elements (U+2580-U+259F)
+    // ▀▁▂▃▄▅▆▇█▉▊▋▌▍▎▏▐░▒▓▔▕▖▗▘▙▚▛▜▝▞▟
+    int char_height = cell_height;
+    if (lattr >= LATTR_TOP)
+      char_height *= 2;
+    int y0 = y;
+    if (lattr == LATTR_BOT)
+      y0 -= cell_height;
+    int xi = x;
+    //printf("x %d y %d w %d h %d cw %d \n", x, y, cell_width, cell_height, char_width);
+
+    /*
+       Mix fg at mix/8 with bg.
+     */
+    colour colmix(char mix)
+    {
+      uint r = (red(fg) * mix + red(bg) * (8 - mix)) / 8;
+      uint g = (green(fg) * mix + green(bg) * (8 - mix)) / 8;
+      uint b = (blue(fg) * mix + blue(bg) * (8 - mix)) / 8;
+      return RGB(r, g, b);
+    }
+    void linedraw(char l, char t, char r, char b, colour c)
+    {
+      HPEN oldpen = SelectObject(dc, CreatePen(PS_SOLID, 0, c));
+      //printf("line %d %d %d %d\n", xi + l, y0 + t, xi + r, y0 + b);
+      MoveToEx(dc, xi + l, y0 + t, null);
+      LineTo(dc, xi + r, y0 + b);
+      DeleteObject(SelectObject(dc, oldpen));
+    }
+    void rectdraw(char l, char t, char r, char b, char sol, colour c)
+    {
+      // solid 0b1111 top right bottom left
+      int cl = char_width * l;
+      int ct = char_height * t;
+      int cr = char_width * r;
+      int cb = char_height * b;
+      int dl = cl % 8;
+      int dt = ct % 8;
+      int dr = cr % 8;
+      int db = cb % 8;
+      cl /= 8;
+      ct /= 8;
+      cr /= 8;
+      cb /= 8;
+      //printf("25%02X <%d%%%d %d%%%d %d%%%d %d%%%d\n", graph, cl, dl, ct, dt, cr, dr, cb, db);
+      int cl_ = cl;
+      int ct_ = ct;
+      int cr_ = cr;
+      int cb_ = cb;
+      if (dl) {
+        if (sol & 0x1)
+          dl = 0;
+        else
+          cl_++;
+      }
+      if (dt) {
+        if (sol & 0x8)
+          dt = 0;
+        else
+          ct_++;
+      }
+      if (dr) {
+        if (sol & 0x4) {
+          dr = 0;
+          cr_++;
+        }
+      }
+      if (db) {
+        if (sol & 0x2) {
+          db = 0;
+          cb_++;
+        }
+      }
+      //printf("25%02X >%d%%%d %d%%%d %d%%%d %d%%%d\n", graph, cl, dl, ct, dt, cr, dr, cb, db);
+      //printf("Rect %d %d %d %d\n", xi + cl_, y0 + ct_, xi + cr_, y0 + cb_);
+      HBRUSH br = CreateSolidBrush(c);
+      FillRect(dc, &(RECT){xi + cl_, y0 + ct_, xi + cr_, y0 + cb_}, br);
+      DeleteObject(br);
+      if (dl)
+        linedraw(cl, ct, cl, cb, colmix(8 - dl));
+      if (dt)
+        linedraw(cl, ct, cr, ct, colmix(8 - dt));
+      if (dr)
+        linedraw(cr, ct, cr, cb, colmix(dr));
+      if (db)
+        linedraw(cl, cb, cr, cb, colmix(db));
+    }
+    inline void rect(char l, char t, char r, char b)
+    {
+      rectdraw(l, t, r, b, 0, fg);
+    }
+    inline void rectsolcol(char l, char t, char r, char b, char mix)
+    {
+      rectdraw(l, t, r, b, 0xF, colmix(mix));
+    }
+    inline void rectsolid(char l, char t, char r, char b, char sol)
+    {
+      rectdraw(l, t, r, b, sol, fg);
+    }
+
+    for (int i = 0; i < ulen; i++) {
+      switch (graph) {
+        when 0x80: rect(0, 0, 8, 4); // UPPER HALF BLOCK
+        when 0x81 ... 0x88: rect(0, 0x88 - graph, 8, 8); // LOWER EIGHTHS
+        when 0x89 ... 0x8F: rect(0, 0, 0x90 - graph, 8); // LEFT EIGHTHS
+        when 0x90: rect(4, 0, 8, 8); // RIGHT HALF BLOCK
+        when 0x91: rectsolcol(0, 0, 8, 8, 2);
+        when 0x92: rectsolcol(0, 0, 8, 8, 3);
+        when 0x93: rectsolcol(0, 0, 8, 8, 5);
+        when 0x94: rect(0, 0, 8, 1); // UPPER ONE EIGHTH BLOCK
+        when 0x95: rect(7, 0, 8, 8); // RIGHT ONE EIGHTH BLOCK
+        when 0x96: rect(0, 4, 4, 8);
+        when 0x97: rect(4, 4, 8, 8);
+        when 0x98: rect(0, 0, 4, 4);
+        // solid 0b1111 top right bottom left
+        when 0x99: rectsolid(0, 4, 4, 8, 0xF);
+                   rectsolid(0, 0, 4, 4, 0xB);
+                   rectsolid(4, 4, 8, 8, 0x7);
+        when 0x9A: rect(0, 0, 4, 4); rect(4, 4, 8, 8);
+        when 0x9B: rectsolid(0, 0, 4, 4, 0xF);
+                   rectsolid(4, 0, 8, 4, 0xD);
+                   rectsolid(0, 4, 4, 8, 0xB);
+        when 0x9C: rectsolid(4, 0, 8, 4, 0xF);
+                   rectsolid(0, 0, 4, 4, 0xD);
+                   rectsolid(4, 4, 8, 8, 0xE);
+        when 0x9D: rect(4, 0, 8, 4);
+        when 0x9E: rect(4, 0, 8, 4); rect(0, 4, 4, 8);
+        when 0x9F: rectsolid(4, 4, 8, 8, 0xF);
+                   rectsolid(4, 0, 8, 4, 0xE);
+                   rectsolid(0, 4, 4, 8, 0x7);
+      }
+
+      xi += char_width;
     }
   }
   else if (graph >> 4) {  // VT100 horizontal lines ⎺⎻(─)⎼⎽
@@ -2346,8 +3328,10 @@ win_text(int x, int y, wchar *text, int len, cattr attr, cattr *textattr, ushort
   }
 
  /* Strikeout */
-  if (attr.attr & ATTR_STRIKEOUT
-      && (cfg.underl_manual || cfg.underl_colour != (colour)-1)) {
+  if ((attr.attr & ATTR_STRIKEOUT)
+      && (cfg.underl_manual || cfg.underl_colour != (colour)-1
+          || (attr.attr & ATTR_ULCOLOUR)
+         )) {
     int soff = (ff->descent + (ff->row_spacing / 2)) * 2 / 3;
     HPEN oldpen = SelectObject(dc, CreatePen(PS_SOLID, 0, ul));
     for (int l = 0; l < line_width; l++) {
@@ -2437,6 +3421,21 @@ win_check_glyphs(wchar *wcs, uint num)
   ReleaseDC(wnd, dc);
 }
 
+#define dont_debug_win_char_width
+
+#ifdef debug_win_char_width
+int
+win_char_width(xchar c)
+{
+#define win_char_width xwin_char_width
+int win_char_width(xchar);
+  int w = win_char_width(c);
+  if (c >= 0x80)
+    printf("win_char_width(%04X) -> %d\n", c, w);
+  return w;
+}
+#endif
+
 /* This function gets the actual width of a character in the normal font.
    Usage:
    * determine whether to trim an ambiguous wide character 
@@ -2449,8 +3448,6 @@ win_char_width(xchar c)
 {
   int findex = (term.curs.attr.attr & FONTFAM_MASK) >> ATTR_FONTFAM_SHIFT;
   struct fontfam * ff = &fontfamilies[findex];
-
-#define win_char_width
 
 #define measure_width
 
@@ -2583,7 +3580,8 @@ win_char_width(xchar c)
                // although FONT_WIDE is actually activated
   }
 
-  if (ambigwide(c) &&
+  if ((c >= 0x3000 && c <= 0x303F)
+     || (ambigwide(c) &&
 #ifdef check_ambig_non_letters
 #warning instead we now check all non-letters with some exclusions
       (c == 0x20AC  // €
@@ -2609,7 +3607,7 @@ win_char_width(xchar c)
        //|| wcschr (W("‐‑‘’‚‛“”„‟‹›"), c) // #712 workaround; now caching
        )
 #endif
-     ) {
+     )) {
     // look up c in charpropcache
     struct charpropcache * cpfound = 0;
     for (uint i = 0; i < ff->cpcachelen[font4index]; i++)
@@ -2693,79 +3691,87 @@ win_set_colour(colour_i i, colour c)
 
   static bool bold_colour_selected = false;
 
+  bool changed_something = false;
+  void cc(colour_i i, colour c)
+  {
+    if (c != colours[i]) {
+      colours[i] = c;
+      changed_something = true;
+    }
+  }
+
   if (c == (colour)-1) {
     // ... reset to default ...
     if (i == BOLD_COLOUR_I) {
-      colours[BOLD_COLOUR_I] = cfg.bold_colour;
+      cc(BOLD_COLOUR_I, cfg.bold_colour);
     }
     else
     if (i == BOLD_FG_COLOUR_I) {
       bold_colour_selected = false;
       if (cfg.bold_colour != (colour)-1)
-        colours[BOLD_FG_COLOUR_I] = cfg.bold_colour;
+        cc(BOLD_FG_COLOUR_I, cfg.bold_colour);
       else
-        colours[BOLD_FG_COLOUR_I] = brighten(colours[FG_COLOUR_I], colours[BG_COLOUR_I], true);
+        cc(BOLD_FG_COLOUR_I, brighten(colours[FG_COLOUR_I], colours[BG_COLOUR_I], true));
     }
     else if (i == FG_COLOUR_I)
-      colours[i] = cfg.fg_colour;
+      cc(i, cfg.fg_colour);
     else if (i == BG_COLOUR_I)
-      colours[i] = cfg.bg_colour;
+      cc(i, cfg.bg_colour);
     else if (i == CURSOR_COLOUR_I)
-      colours[i] = cfg.cursor_colour;
+      cc(i, cfg.cursor_colour);
     else if (i == SEL_COLOUR_I)
-      colours[i] = cfg.sel_bg_colour;
+      cc(i, cfg.sel_bg_colour);
     else if (i == SEL_TEXT_COLOUR_I)
-      colours[i] = cfg.sel_fg_colour;
-
-    return;
+      cc(i, cfg.sel_fg_colour);
   }
-
-  colours[i] = c;
-  if (i < 16)
-    colours[i + ANSI0] = c;
-
+  else {
+    cc(i, c);
+    if (i < 16)
+      cc(i + ANSI0, c);
 #ifdef debug_brighten
-  printf("colours[%d] = %06X\n", i, c);
+    printf("colours[%d] = %06X\n", i, c);
 #endif
 
-  switch (i) {
-    when FG_COLOUR_I:
-      // should we make this conditional, 
-      // unless bold colour has been set explicitly?
-      if (!bold_colour_selected) {
-        if (cfg.bold_colour != (colour)-1)
-          colours[BOLD_FG_COLOUR_I] = cfg.bold_colour;
-        else {
-          colours[BOLD_FG_COLOUR_I] = brighten(c, colours[BG_COLOUR_I], true);
-          // renew this too as brighten() may refer to contrast colour:
-          colours[BOLD_BG_COLOUR_I] = brighten(colours[BG_COLOUR_I], colours[FG_COLOUR_I], true);
+    switch (i) {
+      when FG_COLOUR_I:
+        // should we make this conditional, 
+        // unless bold colour has been set explicitly?
+        if (!bold_colour_selected) {
+          if (cfg.bold_colour != (colour)-1)
+            cc(BOLD_FG_COLOUR_I, cfg.bold_colour);
+          else {
+            cc(BOLD_FG_COLOUR_I, brighten(c, colours[BG_COLOUR_I], true));
+            // renew this too as brighten() may refer to contrast colour:
+            cc(BOLD_BG_COLOUR_I, brighten(colours[BG_COLOUR_I], colours[FG_COLOUR_I], true));
+          }
         }
-      }
-    when BOLD_FG_COLOUR_I:
-      bold_colour_selected = true;
-    when BG_COLOUR_I:
-      if (!bold_colour_selected) {
-        if (cfg.bold_colour != (colour)-1)
-          colours[BOLD_FG_COLOUR_I] = cfg.bold_colour;
-        else {
-          colours[BOLD_BG_COLOUR_I] = brighten(c, colours[FG_COLOUR_I], true);
-          // renew this too as brighten() may refer to contrast colour:
-          colours[BOLD_FG_COLOUR_I] = brighten(colours[FG_COLOUR_I], colours[BG_COLOUR_I], true);
+      when BOLD_FG_COLOUR_I:
+        bold_colour_selected = true;
+      when BG_COLOUR_I:
+        if (!bold_colour_selected) {
+          if (cfg.bold_colour != (colour)-1)
+            cc(BOLD_FG_COLOUR_I, cfg.bold_colour);
+          else {
+            cc(BOLD_BG_COLOUR_I, brighten(c, colours[FG_COLOUR_I], true));
+            // renew this too as brighten() may refer to contrast colour:
+            cc(BOLD_FG_COLOUR_I, brighten(colours[FG_COLOUR_I], colours[BG_COLOUR_I], true));
+          }
         }
+      when CURSOR_COLOUR_I: {
+        // Set the colour of text under the cursor to whichever of foreground
+        // and background colour is further away from the cursor colour.
+        colour fg = colours[FG_COLOUR_I], bg = colours[BG_COLOUR_I];
+        cc(CURSOR_TEXT_COLOUR_I, colour_dist(c, fg) > colour_dist(c, bg) ? fg : bg);
+        cc(IME_CURSOR_COLOUR_I, c);
       }
-    when CURSOR_COLOUR_I: {
-      // Set the colour of text under the cursor to whichever of foreground
-      // and background colour is further away from the cursor colour.
-      colour fg = colours[FG_COLOUR_I], bg = colours[BG_COLOUR_I];
-      colours[CURSOR_TEXT_COLOUR_I] =
-        colour_dist(c, fg) > colour_dist(c, bg) ? fg : bg;
-      colours[IME_CURSOR_COLOUR_I] = c;
+      otherwise:
+        break;
     }
-    otherwise:
-      break;
   }
+
   // Redraw everything.
-  win_invalidate_all();
+  if (changed_something)
+    win_invalidate_all(false);
 }
 
 colour
@@ -2824,3 +3830,68 @@ win_reset_colours(void)
       printf("colour %d %06X [%s]\n", i, (int)colours[i], ci[i - FG_COLOUR_I]);
 #endif
 }
+
+
+void
+win_paint(void)
+{
+  PAINTSTRUCT p;
+  dc = BeginPaint(wnd, &p);
+
+  term_invalidate(
+    (p.rcPaint.left - PADDING) / cell_width,
+    (p.rcPaint.top - PADDING) / cell_height,
+    (p.rcPaint.right - PADDING - 1) / cell_width,
+    (p.rcPaint.bottom - PADDING - 1) / cell_height
+  );
+
+  if (update_state != UPDATE_PENDING) {
+    term_paint();
+    winimg_paint();
+  }
+
+  if (// do not just check whether a background was configured
+      //!*cfg.background &&
+      // check whether a configured background was successfully loaded
+      !bgbrush_bmp &&
+#if CYGWIN_VERSION_API_MINOR >= 74
+      !bgbrush_img &&
+#endif
+      (p.fErase
+       || p.rcPaint.left < PADDING
+       || p.rcPaint.top < PADDING
+       || p.rcPaint.right >= PADDING + cell_width * term.cols
+       || p.rcPaint.bottom >= PADDING + cell_height * term.rows
+      )
+     ) {
+    /* Notes:
+       * Do we actually need this stuff? We paint the background with
+         each win_text chunk anyway, except for the padding border,
+         which could however be touched e.g. by Sixel images?
+       * With a texture/image background, we could try to paint that here 
+         (invoked on WM_PAINT) or on WM_ERASEBKGND, but these messages are 
+         not received sufficiently often, e.g. not when scrolling.
+       * So let's keep finer control and paint background with text chunks 
+         but not modify the established behaviour if there is no background.
+     */
+    colour bg_colour = colours[term.rvideo ? FG_COLOUR_I : BG_COLOUR_I];
+    HBRUSH oldbrush = SelectObject(dc, CreateSolidBrush(bg_colour));
+    HPEN oldpen = SelectObject(dc, CreatePen(PS_SOLID, 0, bg_colour));
+
+    IntersectClipRect(dc, p.rcPaint.left, p.rcPaint.top, p.rcPaint.right,
+                      p.rcPaint.bottom);
+
+    ExcludeClipRect(dc, PADDING, PADDING,
+                    PADDING + cell_width * term.cols,
+                    PADDING + cell_height * term.rows);
+
+    Rectangle(dc, p.rcPaint.left, p.rcPaint.top,
+                  p.rcPaint.right, p.rcPaint.bottom);
+
+    DeleteObject(SelectObject(dc, oldbrush));
+    DeleteObject(SelectObject(dc, oldpen));
+  }
+
+  EndPaint(wnd, &p);
+}
+

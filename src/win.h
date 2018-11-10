@@ -14,12 +14,13 @@
 extern char * home;
 extern char * cmd;
 extern bool icon_is_from_shortcut;
+extern wstring shortcut;
 
 extern void exit_mintty(void);
 extern void report_pos(void);
 extern void win_reconfig(void);
 
-extern void win_update(void);
+extern void win_update(bool update_sel_tip);
 extern void win_schedule_update(void);
 extern void do_update(void);
 
@@ -45,7 +46,7 @@ extern colour win_get_sys_colour(bool fg);
 extern uint colour_dist(colour a, colour b);
 extern colour truecolour(cattr *, colour bg);
 
-extern void win_invalidate_all(void);
+extern void win_invalidate_all(bool clearbg);
 
 extern void win_set_pos(int x, int y);
 extern void win_set_chars(int rows, int cols);
@@ -54,10 +55,9 @@ extern void win_set_geom(int y, int x, int height, int width);
 extern void win_maximise(int max);
 extern void win_set_zorder(bool top);
 extern void win_set_iconic(bool);
-extern void win_update_scrollbar(void);
 extern bool win_is_iconic(void);
-extern void win_get_pos(int *xp, int *yp);
-extern void win_get_pixels(int *height_p, int *width_p);
+extern void win_get_scrpos(int *xp, int *yp, bool with_borders);
+extern void win_get_pixels(int *height_p, int *width_p, bool with_borders);
 extern void win_get_screen_chars(int *rows_p, int *cols_p);
 extern void win_popup_menu(mod_keys mods);
 

@@ -5,11 +5,11 @@
 
 #include "winpriv.h"
 
-static ATOM tip_class;
+static HWND tip_wnd = 0;
+static ATOM tip_class = 0;
 static HFONT tip_font;
 static COLORREF tip_bg;
 static COLORREF tip_text;
-static HWND tip_wnd;
 
 static char sizetip[32] = "";
 
@@ -55,7 +55,7 @@ tip_proc(HWND hWnd, UINT nMsg, WPARAM wParam, LPARAM lParam)
 #ifdef UNICODE
 #warning second number (rows) will sometimes be stripped for unknown reason
 #endif
-      int wtlen = GetWindowTextLength(hWnd);
+      int wtlen = GetWindowTextLengthA(hWnd);
       char wt[wtlen + 1];
       GetWindowTextA(hWnd, wt, wtlen + 1);
       TextOutA(dc, cr.left + 3, cr.top + 3, wt, wtlen);
@@ -110,8 +110,8 @@ win_show_tip(int x, int y, int cols, int rows)
     ShowWindow(tip_wnd, SW_SHOWNOACTIVATE);
   }
   else {
-      SetWindowPos(tip_wnd, null, x, y, 0, 0,
-                   SWP_NOZORDER | SWP_NOSIZE | SWP_NOACTIVATE);
+    SetWindowPos(tip_wnd, null, x, y, 0, 0,
+                 SWP_NOZORDER | SWP_NOSIZE | SWP_NOACTIVATE);
   }
 
   sprintf(sizetip, "%dx%d", cols, rows);

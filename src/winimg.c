@@ -369,7 +369,7 @@ winimg_paint(void)
             if (dchar->attr.attr & (TATTR_RESULT | TATTR_CURRESULT | TATTR_MARKED | TATTR_CURMARKED))
               update_flag = true;
             if (term.selected && !update_flag) {
-              pos scrpos = {y + term.disptop, x};
+              pos scrpos = {y + term.disptop, x, false};
               update_flag = term.sel_rect
                   ? posPle(term.sel_start, scrpos) && posPlt(scrpos, term.sel_end)
                   : posle(term.sel_start, scrpos) && poslt(scrpos, term.sel_end);
@@ -486,9 +486,14 @@ win_emoji_show(int x, int y, wchar * efn, int elen, ushort lattr)
     gpcheck("width", s);
     s = GdipGetImageHeight(img, &ih);
     gpcheck("height", s);
-    // if ih/iw > h/w, make w smaller; if iw/ih > w/h, make h smaller;
-    // so that ih/iw == h/w
-    if (ih * w > h * iw) {
+    // consider aspect ratio so that ih/iw == h/w;
+    // if EMPL_FULL, always adjust w
+    // if ih/iw > h/w, make w smaller
+    // if iw/ih > w/h, make h smaller
+    if (cfg.emoji_placement == EMPL_FULL && ih * w != h * iw) {
+      w = h * iw / ih;
+    }
+    else if (ih * w > h * iw) {
       int w0 = w;
       w = h * iw / ih;
       if (cfg.emoji_placement == EMPL_MIDDLE) {
@@ -507,7 +512,7 @@ win_emoji_show(int x, int y, wchar * efn, int elen, ushort lattr)
   GpGraphics * gr;
   s = GdipCreateFromHDC(GetDC(wnd), &gr);
   gpcheck("hdc", s);
-  s = GdipDrawImageRect(gr, img, col, row, w, h);
+  s = GdipDrawImageRectI(gr, img, col, row, w, h);
   gpcheck("draw", s);
   s = GdipFlush(gr, FlushIntentionFlush);
   gpcheck("flush", s);
