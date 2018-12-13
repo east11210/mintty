@@ -882,7 +882,8 @@ command-line.)
 Unicode-enabled settings: BellFile, ThemeFile, Background, Title, ExitTitle, Icon, Log, 
 Language, Font, Font1..., FontSample, Printer, Answerback, SixelClipChars, 
 Class, AppID, AppName, AppLaunchCmd, 
-DropCommands, UserCommands, SessionCommands, TaskCommands, KeyFunctions.
+DropCommands, UserCommands, SysUserCommands, SessionCommands, TaskCommands, 
+KeyFunctions, UserCommandsPath.
 
 Be careful when running multiple instances of mintty. If options are saved 
 from different instances, or the config file is edited manually, 
@@ -1261,6 +1262,13 @@ incompatibility in the Windows on-screen keyboard,
 just in case is has any side effects.
 
 .TP
+\fBSupport injection of external hotkeys\fP (SupportExternalHotkeys=2)
+This setting supports external Alt+hotkey combinations, esp. Alt+F4 
+to close the window, independently of general Alt+Fn shortcuts support 
+(if option value is 2) and by fixing the buggy hotkey sequence sent 
+by StrokeIt.
+
+.TP
 \fBCopy and Paste shortcuts\fP (ClipShortcuts=yes)
 Checkbox for enabling the clipboard shortcuts \fBCtrl+Ins\fP for copying and
 \fBShift+Ins\fP for pasting.
@@ -1329,6 +1337,25 @@ If this option is enabled, which it is by default, text is copied to the
 clipboard in rich text format (RTF) in addition to plain text format.
 RTF preserves colours and styles when pasting text into applications that
 support it, e.g. word processors.
+
+\fINote:\fP Copy as rich text is also available as an explicit item in 
+the extended context menu.
+
+.TP
+\fBCopy as HTML\fP (CopyAsHTML=0)
+With this option, mintty also copies text in HTML format, using flexible 
+levels of HTML formatting, when applying the normal copy function.
+.br
+\(en \fB0\fP: do not include HTML
+.br
+\(en \fB1\fP: copy HTML text only (no font information)
+.br
+\(en \fB2\fP: copy HTML text (no global background)
+.br
+\(en \fB3\fP: copy HTML (close to screen layout)
+
+\fINote:\fP Copy as HTML levels are also available as explicit items in 
+the extended context menu.
 
 .TP
 \fBClicks place command line cursor\fP (ClicksPlaceCursor=no)
@@ -1686,6 +1713,16 @@ for an overview of SGR attributes.
 .br
 See \fIhttp://invisible-island.net/xterm/ctlseqs/ctlseqs.txt\fP
 for a full listing of escape control sequences.
+.br
+For some of the option values, more specific configuration parameters exist:
+.br
+\(en AllowBlinking=false \(<> SuppressSGR=5,6
+.br
+\(en Enable132ColumnSwitching=false \(~~ SuppressDEC=3 (permanent)
+.br
+\(en NoAltScreen=true \(~~ SuppressDEC=47,1047,1048,1049 (switchable)
+.br
+\(en AllowSetSelection=false \(<> SuppressOSC=52
 .RE
 
 .TP
@@ -1803,9 +1840,12 @@ window manager is used.
 
 .TP
 \fBWindow class name\fP (Class=mintty)
-The \fBClass\fP setting determines the name of the window class of the terminal
-window.  This can be used to help Windows scripting tools such as AutoHotKey to
-distinguish different mintty windows.  The name defaults to "mintty".
+The \fBClass\fP setting determines the name of the window class of the terminal window.
+It can be used to distinguish or group different mintty windows, e.g. for 
+the mintty session switcher, or for Windows scripting tools such as AutoHotKey.
+
+For a flexible grouping configuration, the Class option supports the 
+same \fB%s\fP placeholder parameters as the AppID option.
 
 .SS "Hidden" settings
 The following settings appear neither in the options dialog nor as command line
@@ -1815,6 +1855,13 @@ options, which means they can only be set in config files or using the
 .TP
 \fBClear selection highlighting on input\fP (ClearSelectionOnInput=true)
 When this is disabled, keyboard input or pasting does not clear selection highlighting.
+
+.TP
+\fBSuspend output while selecting\fP (SuspendWhileSelecting=8080)
+During drag-selects, the user may want the screen to hold still 
+to be selected from. Mintty can suspend processing of terminal output 
+for a while; if the buffer exceeds the size configured with this parameter 
+(in bytes), output is flushed. Setting it to 0 disables the feature.
 
 .TP
 \fBTrim trailing space from selection on copy\fP (TrimSelection=true)
@@ -1937,18 +1984,28 @@ from the WSL system name, in order to achieve WSL distribution-specific
 taskbar grouping. This resolves taskbar grouping problems in some cases 
 (wsltty issue #96) but causes similar problems in other cases (issue #784).
 
-\fIWarning:\fP Using this option in a Windows desktop shortcut may 
+\fIWarning:\fP Using this option for a mintty windows started from 
+a Windows shortcut (desktop, taskbar, start menu) may 
 cause trouble with taskbar grouping behaviour. If you need to do that, 
 the shortcut itself should also get attached with the same AppId.
+
+\fINote:\fP Since 2.9.6, if mintty is started via a Windows shortcut 
+which has its own AppID, it is reused for the new mintty window in order 
+to achieve proper taskbar icon grouping. This takes precedence over an 
+explicit setting of the AppID option.
 
 \fIExplanation:\fP Note that Windows shortcut files have their own AppID.
 Hence, if an AppID is specified in the mintty settings, but not on a 
 taskbar-pinned shortcut for invoking mintty, clicking the pinned 
 shortcut will result in a separate taskbar item for the new mintty window, 
 rather than being grouped with the shortcut.
-To avoid this, the shortcut's AppID has to be set to the same string, 
-which can be done using the \fBWin7AppId\fP utility available cloned in 
+
+\fIHint:\fP To avoid AppID inconsistence and thus ungrouped taskbar icons,
+the shortcut's AppID should to be set to the same string as the mintty AppID, 
+which can be done using the \fBwinappid\fP utility available in 
 the mintty utils repository \fIhttps://github.com/mintty/utils\fP.
+As noted above, since mintty 2.9.6, the mintty AppID does not need to be set 
+anymore in this case.
 
 .TP
 \fBApplication Taskbar Shortcut Title\fP (AppName=)
@@ -2125,7 +2182,7 @@ Supported actions are described as follows:
 .br
 \(en \fB"string"\fP or \fB'string'\fP: enters the literal string
 .br
-\(en \fB`command`\fP: enters the output of the command
+\(en \fB`command` (**)\fP: enters the output of the command
 .br
 \(en \fBfullscreen (*)\fP: switches to fullscreen mode
 .br
@@ -2161,6 +2218,16 @@ Supported actions are described as follows:
 .br
 \(en \fBcopy\fP: copies the selection to the clipboard
 .br
+\(en \fBcopy-text\fP: copies text only
+.br
+\(en \fBcopy-rtf\fP: copies rich text format
+.br
+\(en \fBcopy-html-text\fP: copies HTML text only (no font information)
+.br
+\(en \fBcopy-html-format\fP: copies HTML text (no global background)
+.br
+\(en \fBcopy-html-full\fP: copies HTML (close to screen layout)
+.br
 \(en \fBpaste\fP: pastes from the clipboard
 .br
 \(en \fBcopy-paste\fP: copies and pastes
@@ -2193,6 +2260,12 @@ Supported actions are described as follows:
 
 \fINote (*):\fP The exact behaviour of some actions depends on the 
 Shift state as being mapped from.
+
+\fINote (**):\fP For external commands as key functions, the same 
+additional functionality is provided as for context menu user commands 
+(option \fBUserCommands\fP): environment variables and PATH substitution;
+the PATH environment for the external command can be set up 
+with option \fBUserCommandsPath\fP.
 
 \fINote:\fP To just disable the built-in shortcut (and not override it 
 with a user-defined one), but further process the key as normal input, 
@@ -2468,6 +2541,9 @@ added to the localization file of the selected UI localization language
 with the escape sequence ^[[?7711h.
 See the Control Sequences wiki page \fIhttps://github.com/mintty/mintty/wiki/CtrlSeqs#scroll-markers\fP.
 
+\fINote:\fP The PATH environment for the external command can be set up 
+with option \fBUserCommandsPath\fP.
+
 \fINote:\fP This is an experimental feature, with an experimental configuration format.
 
 \fINote:\fP Normal terminal interaction continues after the invoked commands 
@@ -2481,8 +2557,26 @@ in order to avoid the risk of injecting commands via tricky selected text.
 Examples:
 .br
 \(en \fBUserCommands=Paste capital:echo -n "$MINTTY_SELECT" | tr 'a-z' 'A-Z';Paste small:echo -n "$MINTTY_SELECT" | tr 'A-Z' 'a-z'\fP
+.br
+\(en \fBUserCommands=google:cygstart https://www.google.de/search?q="$MINTTY_SELECT"\fP
 
 \fINote:\fP Control characters need to be embedded verbatim; there is no escape notation.
+
+.TP
+\fBUser commands PATH expansion\fP (UserCommandsPath=/bin:%s)
+This setting defines the PATH environment for user-defined external commands,
+applicable to extended context menu commands (UserCommands=...:...)
+and key-attached external commands (KeyFunctions=...:`...`).
+If the value contains a single \fB%s\fP placeholder, the current 
+environment PATH is substituted for it.
+
+.TP
+\fBSystem menu user commands\fP (SysUserCommands=) [DEPRECATED]
+This setting lists user-defined commands for the system menu 
+(right mouse click on title bar or left click on title bar icon).
+If it is configured, the middle items of the menu (including Options... 
+and New) are replaced by the configured commands.
+The configuration is identical to the \fBUserCommands\fP setting.
 
 .TP
 \fBSession launcher commands\fP (SessionCommands=)

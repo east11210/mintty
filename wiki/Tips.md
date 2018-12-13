@@ -70,14 +70,32 @@ _Warning:_ Using this option in a Windows desktop shortcut may
 cause trouble with taskbar grouping behaviour. If you need to do that, 
 the shortcut itself should also get attached with the same AppId.
 
+_Note:_ Since 2.9.6, if mintty is started via a Windows shortcut 
+which has its own AppID, it is reused for the new mintty window in order 
+to achieve proper taskbar icon grouping. This takes precedence over an 
+explicit setting of the AppID option.
+
 _Explanation:_ Note that Windows shortcut files have their own AppID.
 Hence, if an AppID is specified in the mintty settings, but not on a 
 taskbar-pinned shortcut for invoking mintty, clicking the pinned 
 shortcut will result in a separate taskbar item for the new mintty window, 
 rather than being grouped with the shortcut.
-To avoid this, the shortcut's AppID has to be set to the same string, 
-which can be done using the `Win7AppId` utility available cloned in 
+
+_Hint:_ To avoid AppID inconsistence and thus ungrouped taskbar icons,
+the shortcut's AppID should to be set to the same string as the mintty AppID, 
+which can be done using the `winappid` utility available in 
 the mintty [utils repository](https://github.com/mintty/utils).
+As noted above, since mintty 2.9.6, the mintty AppID does not need to be set 
+anymore in this case.
+
+
+## Window session grouping ##
+
+For grouping of window icons in the taskbar, Windows uses the intricate 
+AppID concept as explained above. For grouping of desktop windows, as 
+used by the mintty session switcher or external window manipulation tools, 
+Windows uses the distinct but likewise intricate Class concept.
+Mintty provides flexible configuration to set up either of them, see manual.
 
 
 ## Window icons ##
@@ -348,6 +366,20 @@ let &t_ti.="\e[1 q"
 let &t_SI.="\e[5 q"
 let &t_EI.="\e[1 q"
 let &t_te.="\e[0 q"
+```
+
+### Enabling full mouse functionality in vim ###
+
+Before vim 8.1.0566, full mouse mode is not automatically enabled in mintty.
+Add this to _~/.vimrc_ for a workaround:
+
+```
+set mouse=a
+if has("mouse_sgr")
+    set ttymouse=sgr
+else
+    set ttymouse=xterm2
+end
 ```
 
 ### Blinking cursor reset ###
@@ -915,6 +947,8 @@ and the Ctrl+Shift+I shortcut (if enabled).
 For configuration, see settings `SessionCommands`, `Menu*`, 
 and `SessionGeomSync`.
 Distinct sets of sessions can be set up with the setting `-o Class=...`.
+For flexible window grouping, this setting supports the same placeholders 
+as the `AppID` option.
 
 
 ## Multi-monitor support ##

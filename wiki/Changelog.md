@@ -1,3 +1,27 @@
+### 2.9.5 (5 December 2018) ###
+
+Window handling
+  * Fixed startup directory after cloning new window after starting from desktop shortcut (#784, mintty/wsltty#96).
+  * Avoiding stale hover indication in unfocussed window.
+  * Changed default handling of resolution change to HandleDPI=2 (#824).
+
+Tweaks to HTML clipboard/export feature
+  * Flexible HTML formatting levels.
+  * Configurable, also in Options dialog.
+  * No more table cell container.
+  * HTML escaping.
+  * Apply styles individually and other tweaks for increased compatibility.
+  * Font fallback 'monospace'.
+  * Find relative HTML file name on Shift+"HTML Screen Dump".
+
+Configuration
+  * CopyAsHTML (#825, #811).
+
+Other
+  * Ensuring /bin in PATH for user commands.
+
+### 2.9.4 (10 November 2018) ###
+
 Terminal features
   * Copy as HTML (#811).
   * Mitigate stalling on very long paste buffer lines (#810).
@@ -8,6 +32,7 @@ Appearance
   * Option Background== for floating window effect (using desktop wallpaper as background) (#18, ~#666, ~~#501).
 
 Window handling
+  * Fixed suspend-output-while-selecting buffer, size is configurable (#816, ~#799).
   * Consider glyph width for font width determination (#808).
   * Do not start process to construct process list for exit confirmation (~#448).
   * Enhanced taskbar icon grouping behaviour (#784, mintty/wsltty#96, ?#495, ?#420, ??#801).
@@ -16,6 +41,7 @@ Window handling
 
 Configuration
   * AppID supports placeholders for flexible customization of taskbar icon grouping behaviour (#784, mintty/wsltty#96, ?#495, ?#420, ??#801).
+  * Option SuspendWhileSelecting to set the max size of the suspend-output-while-selecting buffer (#816, ~#799).
 
 ### 2.9.3 (4 October 2018) ###
 

@@ -80,6 +80,7 @@ typedef struct {
   bool ctrl_alt_is_altgr;
   int ctrl_alt_delay_altgr;
   bool old_altgr_detection;
+  int external_hotkeys;
   bool clip_shortcuts;
   bool window_shortcuts;
   bool switch_shortcuts;
@@ -99,6 +100,7 @@ typedef struct {
   // Mouse
   bool copy_on_select;
   bool copy_as_rtf;
+  char copy_as_html;
   bool clicks_place_cursor;
   char middle_click_action;
   char right_click_action;
@@ -158,6 +160,7 @@ typedef struct {
   string suppress_wheel;
   string filter_paste;
   bool input_clears_selection;
+  int suspbuf_max;
   bool trim_selection;
   char charwidth;
   char emojis;
@@ -167,6 +170,8 @@ typedef struct {
   wstring app_launch_cmd;
   wstring drop_commands;
   wstring user_commands;
+  wstring sys_user_commands;
+  wstring user_commands_path;
   wstring session_commands;
   wstring task_commands;
   string menu_mouse;
