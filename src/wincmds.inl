@@ -170,10 +170,10 @@ command_dialog_proc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lParam)
       ListView_InsertColumn(cmds_list_wnd, 0, &lc);
       lc.cx = 200;
       lc.pszText = "Title";
-      ListView_InsertColumn(cmds_list_wnd, 1, &lc); 
+      ListView_InsertColumn(cmds_list_wnd, 1, &lc);
       lc.cx = 500;
       lc.pszText = "Command";
-      ListView_InsertColumn(cmds_list_wnd, 2, &lc); 
+      ListView_InsertColumn(cmds_list_wnd, 2, &lc);
       // cmds_ctrlbox = ctrl_new_box();
       // setup_cmds_box(cmds_ctrlbox);
 
@@ -224,7 +224,7 @@ command_dialog_proc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lParam)
               int item = ListView_GetNextItem(cmds_list_wnd, -1, LVNI_ALL | LVNI_SELECTED);
               wchar content[1024], command[1024];
               ListView_GetItemTextW(cmds_list_wnd, item, 2, content, lengthof(content));
-              term_paste(command, command_get_content(content, command));
+              term_paste(command, command_get_content(content, command), true);
               DestroyWindow(cmds_wnd);
             }
             when VK_ESCAPE:
