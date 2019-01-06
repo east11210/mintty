@@ -158,6 +158,7 @@ const config default_cfg = {
   // "Hidden"
   .bidi = 2,
   .disable_alternate_screen = false,
+  .display_speedup = 6,
   .suppress_sgr = "",
   .suppress_dec = "",
   .suppress_win = "",
@@ -394,6 +395,7 @@ options[] = {
   // "Hidden"
   {"Bidi", OPT_INT, offcfg(bidi)},
   {"NoAltScreen", OPT_BOOL, offcfg(disable_alternate_screen)},
+  {"DisplaySpeedup", OPT_INT, offcfg(display_speedup)},
   {"SuppressSGR", OPT_STRING, offcfg(suppress_sgr)},
   {"SuppressDEC", OPT_STRING, offcfg(suppress_dec)},
   {"SuppressWIN", OPT_STRING, offcfg(suppress_win)},
@@ -412,7 +414,7 @@ options[] = {
   {"AppLaunchCmd", OPT_WSTRING, offcfg(app_launch_cmd)},
   {"DropCommands", OPT_WSTRING | OPT_KEEPCR, offcfg(drop_commands)},
   {"UserCommands", OPT_WSTRING | OPT_KEEPCR, offcfg(user_commands)},
-  {"SysUserCommands", OPT_WSTRING | OPT_KEEPCR, offcfg(sys_user_commands)},
+  {"SysMenuFunctions", OPT_WSTRING | OPT_KEEPCR, offcfg(sys_user_commands)},
   {"UserCommandsPath", OPT_WSTRING, offcfg(user_commands_path)},
   {"SessionCommands", OPT_WSTRING | OPT_KEEPCR, offcfg(session_commands)},
   {"TaskCommands", OPT_WSTRING | OPT_KEEPCR, offcfg(task_commands)},

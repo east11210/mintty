@@ -778,10 +778,10 @@ foreground_prog()
 }
 
 void
-user_command(int n)
+user_command(wstring commands, int n)
 {
-  if (*cfg.user_commands) {
-    char * cmds = cs__wcstombs(cfg.user_commands);
+  if (*commands) {
+    char * cmds = cs__wcstombs(commands);
     char * cmdp = cmds;
     char sepch = ';';
     if ((uchar)*cmdp <= (uchar)' ')
@@ -815,6 +815,9 @@ user_command(int n)
           free(fgd);
         }
         term_cmd(progp);
+        unsetenv("MINTTY_CWD");
+        unsetenv("MINTTY_PROG");
+        unsetenv("MINTTY_PID");
         break;
       }
       n--;
